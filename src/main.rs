@@ -11,7 +11,17 @@ fn main() {
         let mut input = String::new();
         stdin.read_line(&mut input).unwrap();
 
-        // Hardcoded for now
-        println!("{}: command not found", input.trim());
+        // Parse command
+        let mut input = input.trim().split_whitespace();
+        let cmd = if let Some(cmd) = input.next() {
+            cmd
+        } else {
+            continue;
+        };
+
+        match cmd {
+            "exit" => break,
+            _ => println!("{}: command not found", cmd),
+        }
     }
 }
