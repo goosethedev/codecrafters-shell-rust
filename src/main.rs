@@ -1,11 +1,12 @@
 #[allow(unused_imports)]
 use std::io::{self, Write};
 use std::{
+    env::set_current_dir,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
-const BUILTINS: [&str; 4] = ["echo", "exit", "type", "pwd"];
+const BUILTINS: [&str; 5] = ["cd", "echo", "exit", "type", "pwd"];
 
 fn main() {
     loop {
@@ -19,7 +20,7 @@ fn main() {
         stdin.read_line(&mut input).unwrap();
 
         // Parse command
-        let mut input = input.trim().split_whitespace();
+        let mut input = input.split_whitespace();
         let cmd = if let Some(cmd) = input.next() {
             cmd
         } else {
@@ -41,6 +42,13 @@ fn main() {
                 println!("{}", args.join(" "))
             }
             "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
+            "cd" => match input.next().map(Path::new) {
+                Some(path) if path.is_dir() => {
+                    set_current_dir(path).expect("Error changing working dir")
+                }
+                Some(path) => println!("cd: {}: No such file or directory", path.to_str().unwrap()),
+                None => eprintln!("Error: argument required"),
+            },
             "exit" => break,
             _ => match search_bin_in_path(cmd) {
                 Some(bin_path) => {
@@ -64,8 +72,7 @@ fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
             eprintln!("Couldn't read directory: {}", p.to_string_lossy());
             return false;
         };
-        dir.find(|p| p.as_ref().unwrap().file_name() == bin)
-            .is_some()
+        dir.any(|p| p.as_ref().unwrap().file_name() == bin)
     });
     path.map(|p| Path::new(&format!("{p}/{bin}")).into())
 }
