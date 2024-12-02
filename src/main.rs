@@ -44,7 +44,12 @@ fn main() {
             "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
             "cd" => match input.next().map(Path::new) {
                 Some(path) if path.is_dir() => {
-                    set_current_dir(path).expect("Error changing working dir")
+                    set_current_dir(path).expect("Error changing working dir");
+                }
+                Some(path) if path.starts_with("~") => {
+                    let home = std::env::var("HOME").expect("HOME var not found");
+                    let path = path.to_string_lossy().replace("~", &home);
+                    set_current_dir(path).expect("Error changing working dir");
                 }
                 Some(path) => println!("cd: {}: No such file or directory", path.to_str().unwrap()),
                 None => eprintln!("Error: argument required"),
