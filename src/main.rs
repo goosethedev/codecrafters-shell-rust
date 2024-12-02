@@ -26,7 +26,24 @@ fn main() {
         match cmd {
             "type" => match input.next() {
                 Some(arg) if BUILTINS.contains(&arg) => println!("{arg} is a shell builtin"),
-                Some(arg) => println!("{arg}: not found"),
+                Some(arg) => {
+                    let path = std::env::var("PATH").expect("Unable to find PATH variable");
+                    let path = path.split(':').find(|p| {
+                        let p = std::path::Path::new(p);
+                        let mut dir = if let Ok(dir) = std::fs::read_dir(p) {
+                            dir
+                        } else {
+                            eprintln!("Couldn't read directory: {}", p.to_string_lossy());
+                            return false;
+                        };
+                        dir.find(|p| p.as_ref().unwrap().file_name() == arg)
+                            .is_some()
+                    });
+                    match path {
+                        Some(path) => println!("{arg} is {path}/{arg}"),
+                        None => println!("{arg}: not found"),
+                    };
+                }
                 None => eprintln!("Error: argument required"),
             },
             "echo" => {
