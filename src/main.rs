@@ -5,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-const BUILTINS: [&str; 3] = ["echo", "exit", "type"];
+const BUILTINS: [&str; 4] = ["echo", "exit", "type", "pwd"];
 
 fn main() {
     loop {
@@ -40,6 +40,7 @@ fn main() {
                 let args: Vec<&str> = input.collect();
                 println!("{}", args.join(" "))
             }
+            "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
             "exit" => break,
             _ => match search_bin_in_path(cmd) {
                 Some(bin_path) => {
