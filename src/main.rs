@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 fn main() {
     loop {
+        // Print shell $ sign
         print!("$ ");
         io::stdout().flush().unwrap();
 
@@ -19,7 +20,12 @@ fn main() {
             continue;
         };
 
+        // Execute command
         match cmd {
+            "echo" => {
+                let args: Vec<&str> = input.collect();
+                println!("{}", args.join(" "))
+            }
             "exit" => break,
             _ => println!("{}: command not found", cmd),
         }
