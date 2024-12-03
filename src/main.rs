@@ -76,7 +76,7 @@ fn read_command() -> Vec<String> {
         command.push_str(&buffer);
 
         // Parse line
-        if let Some(args) = parse_line(&command.trim()) {
+        if let Some(args) = parse_line(command.trim()) {
             return args;
         }
     }
@@ -92,21 +92,21 @@ fn parse_line(line: &str) -> Option<Vec<String>> {
             b'\'' | b'"' => {
                 let mut closed = false;
                 let delim = *ch;
-                while let Some(ch) = iter.next() {
+                for ch in iter.by_ref() {
                     if *ch == delim {
                         closed = true;
                         break;
-                    } else if *ch == b'\\' && delim == b'"' {
-                        buf.push(*iter.next().unwrap() as char);
-                    } else {
-                        buf.push(*ch as char);
                     }
+                    buf.push(*ch as char);
                 }
                 if !closed {
                     return None;
                 }
                 args.push(buf.clone());
                 buf = String::new();
+            }
+            b'\\' => {
+                buf.push(*iter.next().unwrap() as char);
             }
             b'\n' | b' ' => {
                 if !buf.is_empty() {
@@ -177,14 +177,20 @@ mod tests {
         let expected = expected.map(String::from).to_vec();
         assert_eq!(parse_line("echo \"hello world\""), Some(expected));
 
-        // TODO: Test fails when it shouldn't
-        // let expected = ["echo", r#"hello\ \world"#];
-        // let expected = expected.map(String::from).to_vec();
-        // assert_eq!(parse_line(r#"echo "hello\ \world""#), Some(expected));
+        let expected = ["echo", r"hello\ \world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line(r####"echo "hello\ \world""####), Some(expected));
     }
 
     #[test]
     fn test_parse_args_multiline() {
         assert_eq!(parse_line("echo 'hello world"), None);
+    }
+
+    #[test]
+    fn test_parse_args_backslash_outside() {
+        let expected = ["echo", "hello   world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line(r#"echo hello\ \ \ world"#), Some(expected));
     }
 }
