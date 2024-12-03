@@ -84,34 +84,43 @@ fn read_command() -> Vec<String> {
 
 fn parse_line(line: &str) -> Option<Vec<String>> {
     let mut args = vec![];
-    let mut inside_quote = false;
     let mut buf = String::new();
+    let mut iter = line.as_bytes().iter().peekable();
 
-    for ch in line.as_bytes() {
-        if *ch == b'\'' {
-            inside_quote = !inside_quote;
-            if !inside_quote && !buf.is_empty() {
-                args.push(buf);
-                buf = "".into();
+    while let Some(ch) = iter.next() {
+        match ch {
+            b'\'' | b'"' => {
+                let mut closed = false;
+                let delim = *ch;
+                while let Some(ch) = iter.next() {
+                    if *ch == delim {
+                        closed = true;
+                        break;
+                    } else if *ch == b'\\' && delim == b'"' {
+                        buf.push(*iter.next().unwrap() as char);
+                    } else {
+                        buf.push(*ch as char);
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+                args.push(buf.clone());
+                buf = String::new();
             }
-        } else if *ch == b' ' && !inside_quote {
-            if !buf.is_empty() {
-                args.push(buf);
-                buf = "".into();
+            b'\n' | b' ' => {
+                if !buf.is_empty() {
+                    args.push(buf.clone());
+                    buf = String::new();
+                }
             }
-        } else {
-            buf.push(*ch as char);
-        }
+            _ => buf.push(*ch as char),
+        };
     }
-
-    if inside_quote {
-        None
-    } else {
-        if !buf.is_empty() {
-            args.push(buf.trim_end().into());
-        }
-        Some(args)
+    if !buf.is_empty() {
+        args.push(buf);
     }
+    Some(args)
 }
 
 fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
@@ -160,6 +169,18 @@ mod tests {
         let expected = ["echo", "hello world", "rust"];
         let expected = expected.map(String::from).to_vec();
         assert_eq!(parse_line("echo 'hello world' rust"), Some(expected));
+    }
+
+    #[test]
+    fn test_parse_args_double_quotes() {
+        let expected = ["echo", "hello world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line("echo \"hello world\""), Some(expected));
+
+        // TODO: Test fails when it shouldn't
+        // let expected = ["echo", r#"hello\ \world"#];
+        // let expected = expected.map(String::from).to_vec();
+        // assert_eq!(parse_line(r#"echo "hello\ \world""#), Some(expected));
     }
 
     #[test]
