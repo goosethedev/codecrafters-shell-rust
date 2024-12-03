@@ -10,17 +10,9 @@ const BUILTINS: [&str; 5] = ["cd", "echo", "exit", "type", "pwd"];
 
 fn main() {
     loop {
-        // Print shell $ sign
-        print!("$ ");
-        io::stdout().flush().unwrap();
-
-        // Wait for user input
-        let stdin = io::stdin();
-        let mut input = String::new();
-        stdin.read_line(&mut input).unwrap();
-
-        // Parse command
-        let mut input = input.split_whitespace();
+        // Read a (complete) command
+        let input = read_command();
+        let mut input = input.into_iter();
         let cmd = if let Some(cmd) = input.next() {
             cmd
         } else {
@@ -28,21 +20,23 @@ fn main() {
         };
 
         // Execute command
-        match cmd {
+        match cmd.as_str() {
             "type" => match input.next() {
-                Some(arg) if BUILTINS.contains(&arg) => println!("{arg} is a shell builtin"),
-                Some(arg) => match search_bin_in_path(arg) {
+                Some(arg) if BUILTINS.contains(&arg.as_str()) => {
+                    println!("{arg} is a shell builtin")
+                }
+                Some(arg) => match search_bin_in_path(arg.as_str()) {
                     Some(bin_path) => println!("{arg} is {}", bin_path.to_str().unwrap()),
                     None => println!("{arg}: not found"),
                 },
                 None => eprintln!("Error: argument required"),
             },
             "echo" => {
-                let args: Vec<&str> = input.collect();
+                let args: Vec<_> = input.collect();
                 println!("{}", args.join(" "))
             }
             "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
-            "cd" => match input.next().map(Path::new) {
+            "cd" => match input.next().map(PathBuf::from) {
                 Some(path) if path.is_dir() => {
                     set_current_dir(path).expect("Error changing working dir");
                 }
@@ -55,7 +49,7 @@ fn main() {
                 None => eprintln!("Error: argument required"),
             },
             "exit" => break,
-            _ => match search_bin_in_path(cmd) {
+            _ => match search_bin_in_path(&cmd) {
                 Some(bin_path) => {
                     let out = execute_bin(&bin_path, input.collect());
                     let out = String::from_utf8(out.stdout).unwrap();
@@ -64,6 +58,59 @@ fn main() {
                 None => println!("{}: command not found", cmd),
             },
         }
+    }
+}
+
+fn read_command() -> Vec<String> {
+    // Print shell $ sign
+    print!("$ ");
+    io::stdout().flush().unwrap();
+
+    let stdin = io::stdin();
+    let mut buffer = String::new();
+    let mut command = String::new();
+
+    loop {
+        // Wait for user input
+        stdin.read_line(&mut buffer).unwrap();
+        command.push_str(&buffer);
+
+        // Parse line
+        if let Some(args) = parse_line(&command.trim()) {
+            return args;
+        }
+    }
+}
+
+fn parse_line(line: &str) -> Option<Vec<String>> {
+    let mut args = vec![];
+    let mut inside_quote = false;
+    let mut buf = String::new();
+
+    for ch in line.as_bytes() {
+        if *ch == b'\'' {
+            inside_quote = !inside_quote;
+            if !inside_quote && !buf.is_empty() {
+                args.push(buf);
+                buf = "".into();
+            }
+        } else if *ch == b' ' && !inside_quote {
+            if !buf.is_empty() {
+                args.push(buf);
+                buf = "".into();
+            }
+        } else {
+            buf.push(*ch as char);
+        }
+    }
+
+    if inside_quote {
+        None
+    } else {
+        if !buf.is_empty() {
+            args.push(buf.trim_end().into());
+        }
+        Some(args)
     }
 }
 
@@ -82,9 +129,41 @@ fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
     path.map(|p| Path::new(&format!("{p}/{bin}")).into())
 }
 
-fn execute_bin(bin: &PathBuf, args: Vec<&str>) -> Output {
+fn execute_bin(bin: &PathBuf, args: Vec<String>) -> Output {
     Command::new(bin)
         .args(args)
         .output()
         .expect("Failed to execute")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_line;
+
+    #[test]
+    fn test_parse_args_common() {
+        let expected = ["echo", "hello", "world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line("echo hello world"), Some(expected));
+    }
+
+    #[test]
+    fn test_parse_args_single_quotes() {
+        let expected = ["echo", "hello world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line("echo 'hello world'"), Some(expected));
+
+        let expected = ["echo", "hello world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line("'echo' 'hello world'"), Some(expected));
+
+        let expected = ["echo", "hello world", "rust"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line("echo 'hello world' rust"), Some(expected));
+    }
+
+    #[test]
+    fn test_parse_args_multiline() {
+        assert_eq!(parse_line("echo 'hello world"), None);
+    }
 }
