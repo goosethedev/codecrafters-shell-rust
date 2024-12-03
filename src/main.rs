@@ -92,18 +92,24 @@ fn parse_line(line: &str) -> Option<Vec<String>> {
             b'\'' | b'"' => {
                 let mut closed = false;
                 let delim = *ch;
-                for ch in iter.by_ref() {
+                while let Some(ch) = iter.next() {
                     if *ch == delim {
                         closed = true;
                         break;
+                    };
+                    if *ch == b'\\' && delim == b'"' {
+                        let next = iter.next().unwrap();
+                        if *next != b'"' && *next != b'\\' {
+                            buf.push('\\');
+                        }
+                        buf.push(*next as char);
+                    } else {
+                        buf.push(*ch as char);
                     }
-                    buf.push(*ch as char);
                 }
                 if !closed {
                     return None;
                 }
-                args.push(buf.clone());
-                buf = String::new();
             }
             b'\\' => {
                 buf.push(*iter.next().unwrap() as char);
@@ -150,7 +156,7 @@ mod tests {
     use crate::parse_line;
 
     #[test]
-    fn test_parse_args_common() {
+    fn test_parse_args_simple() {
         let expected = ["echo", "hello", "world"];
         let expected = expected.map(String::from).to_vec();
         assert_eq!(parse_line("echo hello world"), Some(expected));
@@ -172,14 +178,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_args_single_quotes_with_backslash() {
+        let expected = ["echo", r"hello\ world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(parse_line(r"'echo' 'hello\ world'"), Some(expected));
+    }
+
+    #[test]
     fn test_parse_args_double_quotes() {
         let expected = ["echo", "hello world"];
         let expected = expected.map(String::from).to_vec();
         assert_eq!(parse_line("echo \"hello world\""), Some(expected));
+    }
 
+    #[test]
+    fn test_parse_args_double_quotes_with_backslash() {
         let expected = ["echo", r"hello\ \world"];
         let expected = expected.map(String::from).to_vec();
         assert_eq!(parse_line(r####"echo "hello\ \world""####), Some(expected));
+
+        let expected = ["echo", r"hello'script'\n'world"];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(
+            parse_line(r#"echo "hello'script'\n'world""#),
+            Some(expected)
+        );
+
+        let expected = ["echo", r#"hello"insidequotesscript""#];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(
+            parse_line(r#"echo "hello\"insidequotes"script\""#),
+            Some(expected)
+        );
+
+        let expected = ["echo", r#"world'shell'\n'hello"#];
+        let expected = expected.map(String::from).to_vec();
+        assert_eq!(
+            parse_line(r#"echo "world'shell'\\n'hello""#),
+            Some(expected)
+        );
     }
 
     #[test]
