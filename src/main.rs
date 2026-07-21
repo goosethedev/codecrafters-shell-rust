@@ -1,5 +1,7 @@
 use std::io::{self, Write, stdin};
 
+const BUILTINS: &[&str] = &["echo", "type", "exit"];
+
 fn main() -> anyhow::Result<()> {
     let stdin = stdin();
     let mut buf = String::new();
@@ -11,12 +13,20 @@ fn main() -> anyhow::Result<()> {
 
         let mut args = buf.trim().splitn(2, ' ');
         let command = args.next().unwrap();
+        let param: String = args.collect();
         match command {
-            "exit" => break Ok(()),
-            "echo" => {
-                println!("{}", args.collect::<String>());
+            "type" => {
+                if BUILTINS.contains(&param.as_str().into()) {
+                    println!("{param} is a shell builtin");
+                } else {
+                    println!("{param}: not found");
+                }
             }
-            _ => println!("{}: command not found", command),
+            "echo" => {
+                println!("{param}");
+            }
+            "exit" => break Ok(()),
+            _ => println!("{command}: command not found"),
         }
         buf.clear();
     }
