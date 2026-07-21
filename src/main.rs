@@ -1,4 +1,7 @@
-use std::io::{self, Write, stdin};
+use std::{
+    io::{self, Write, stdin},
+    path::{Path, PathBuf},
+};
 
 const BUILTINS: &[&str] = &["echo", "type", "exit"];
 
@@ -18,6 +21,8 @@ fn main() -> anyhow::Result<()> {
             "type" => {
                 if BUILTINS.contains(&param.as_str().into()) {
                     println!("{param} is a shell builtin");
+                } else if let Some(bin_path) = search_bin_in_path(&param) {
+                    println!("{param} is {}", bin_path.to_str().unwrap());
                 } else {
                     println!("{param}: not found");
                 }
@@ -30,4 +35,17 @@ fn main() -> anyhow::Result<()> {
         }
         buf.clear();
     }
+}
+
+fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var("PATH").expect("Unable to find PATH variable");
+    let path = path.split(':').find(|p| {
+        let p = std::path::Path::new(p);
+        let Ok(mut dir) = std::fs::read_dir(p) else {
+            eprintln!("Couldn't read directory: {}", p.to_string_lossy());
+            return false;
+        };
+        dir.any(|p| p.as_ref().unwrap().file_name() == bin)
+    });
+    path.map(|p| Path::new(&format!("{p}/{bin}")).into())
 }
