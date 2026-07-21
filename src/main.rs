@@ -7,6 +7,11 @@ fn main() -> anyhow::Result<()> {
         let stdin = stdin();
         let mut buf = String::new();
         stdin.read_line(&mut buf)?;
-        println!("{}: command not found", buf.trim());
+
+        let command = buf.trim();
+        match command {
+            "exit" => break Ok(()),
+            _ => println!("{}: command not found", command),
+        }
     }
 }
