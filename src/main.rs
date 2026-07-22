@@ -1,7 +1,5 @@
-use std::{
-    io::{self, Write, stdin},
-    path::{Path, PathBuf},
-};
+use std::io::{self, Write, stdin};
+use std::path::{Path, PathBuf};
 
 const BUILTINS: &[&str] = &["echo", "type", "exit"];
 
@@ -38,14 +36,22 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var("PATH").expect("Unable to find PATH variable");
-    let path = path.split(':').find(|p| {
-        let p = std::path::Path::new(p);
-        let Ok(mut dir) = std::fs::read_dir(p) else {
-            eprintln!("Couldn't read directory: {}", p.to_string_lossy());
-            return false;
-        };
-        dir.any(|p| p.as_ref().unwrap().file_name() == bin)
-    });
-    path.map(|p| Path::new(&format!("{p}/{bin}")).into())
+    let path_var = std::env::var_os("PATH").expect("Unable to find PATH variable");
+
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(bin);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    match path.metadata() {
+        Ok(meta) if meta.is_file() => meta.permissions().mode() & 0o111 != 0,
+        _ => false,
+    }
 }
