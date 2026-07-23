@@ -39,7 +39,6 @@ impl<'a> Lexer<'a> {
         let mut buf = String::new();
         while let Some(ch) = self.chars.peek() {
             match *ch {
-                // TODO: parse quoted values and push to the string
                 '\'' => {
                     self.chars.next().unwrap(); // consume opening quote
                     while let Some(ch) = self.chars.next_if(|ch| *ch != '\'') {
@@ -50,7 +49,17 @@ impl<'a> Lexer<'a> {
                         unreachable!("unclosed single-quoted string");
                     }
                 }
-                // '"' => {},
+                '"' => {
+                    self.chars.next().unwrap(); // consume opening quote
+                    while let Some(ch) = self.chars.next_if(|ch| *ch != '"') {
+                        // TODO: parse special delimiter e.g. '\' '$'
+                        buf.push(ch);
+                    }
+                    // Consume closing quote
+                    if self.chars.next_if(|ch| *ch == '"').is_none() {
+                        unreachable!("unclosed single-quoted string");
+                    }
+                }
                 ch if ch.is_ascii_whitespace() => break,
                 _ => buf.push(self.chars.next().unwrap()),
             }
