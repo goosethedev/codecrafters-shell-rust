@@ -7,7 +7,7 @@ use std::process::Output;
 
 use crate::lexer::{Lexer, Token};
 
-const BUILTINS: &[&str] = &["echo", "type", "exit"];
+const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd"];
 
 struct Command {
     bin: String,
@@ -60,6 +60,7 @@ fn main() -> anyhow::Result<()> {
                 let args = args.join(" ");
                 println!("{args}");
             }
+            "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
             "exit" => break Ok(()),
             bin => match search_bin_in_path(bin) {
                 Some(bin) => {
