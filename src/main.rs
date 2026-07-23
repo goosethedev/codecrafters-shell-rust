@@ -61,6 +61,18 @@ fn main() -> anyhow::Result<()> {
                 println!("{args}");
             }
             "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
+            "cd" => match args.first().map(PathBuf::from) {
+                Some(path) if path.is_dir() => {
+                    std::env::set_current_dir(path).expect("Error changing working dir");
+                }
+                Some(path) if path.starts_with("~") => {
+                    let home = std::env::var("HOME").expect("HOME var not found");
+                    let path = path.to_string_lossy().replace("~", &home);
+                    std::env::set_current_dir(path).expect("Error changing working dir");
+                }
+                Some(path) => println!("cd: {}: No such file or directory", path.to_str().unwrap()),
+                None => eprintln!("Error: argument required"),
+            },
             "exit" => break Ok(()),
             bin => match search_bin_in_path(bin) {
                 Some(bin) => {
