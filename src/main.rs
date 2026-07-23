@@ -56,10 +56,7 @@ fn main() -> anyhow::Result<()> {
                     println!("{param}: not found");
                 }
             }
-            "echo" => {
-                let args = args.join(" ");
-                println!("{args}");
-            }
+            "echo" => println!("{}", args.join(" ")),
             "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
             "cd" => match args.first().map(PathBuf::from) {
                 Some(path) if path.is_dir() => {

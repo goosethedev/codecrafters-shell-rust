@@ -40,7 +40,16 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.chars.peek() {
             match *ch {
                 // TODO: parse quoted values and push to the string
-                // '\'' => {},
+                '\'' => {
+                    self.chars.next().unwrap(); // consume opening quote
+                    while let Some(ch) = self.chars.next_if(|ch| *ch != '\'') {
+                        buf.push(ch);
+                    }
+                    // Consume closing quote
+                    if self.chars.next_if(|ch| *ch == '\'').is_none() {
+                        unreachable!("unclosed single-quoted string");
+                    }
+                }
                 // '"' => {},
                 ch if ch.is_ascii_whitespace() => break,
                 _ => buf.push(self.chars.next().unwrap()),
