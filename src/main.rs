@@ -1,9 +1,36 @@
+mod lexer;
+
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
+
+use crate::lexer::{Lexer, Token};
 
 const BUILTINS: &[&str] = &["echo", "type", "exit"];
+
+struct Command {
+    bin: String,
+    args: Vec<String>,
+}
+
+impl Command {
+    fn parse(input: &str) -> Option<Self> {
+        let mut tokens = Lexer::new(input).into_iter();
+        let Token::Value(bin) = tokens.next()? else {
+            return None;
+        };
+        let mut args = vec![];
+
+        for t in tokens {
+            match t {
+                Token::Value(s) => args.push(s),
+                _ => {}
+            }
+        }
+        Some(Self { bin, args })
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     let stdin = std::io::stdin();
@@ -14,12 +41,14 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().flush().unwrap();
         stdin.read_line(&mut buf)?;
 
-        let mut args = buf.trim().split(' ');
-        let command = args.next().unwrap();
-        match command {
+        let Some(Command { bin, args }) = Command::parse(&buf) else {
+            continue;
+        };
+
+        match bin.as_str() {
             "type" => {
-                let param = args.next().unwrap();
-                if BUILTINS.contains(&param) {
+                let param = args.first().unwrap();
+                if BUILTINS.contains(&param.as_str()) {
                     println!("{param} is a shell builtin");
                 } else if let Some(bin_path) = search_bin_in_path(&param) {
                     println!("{param} is {}", bin_path.to_str().unwrap());
@@ -28,14 +57,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             "echo" => {
-                let args: Vec<&str> = args.collect();
                 let args = args.join(" ");
                 println!("{args}");
             }
             "exit" => break Ok(()),
             bin => match search_bin_in_path(bin) {
                 Some(bin) => {
-                    let args = args.collect();
                     match execute_command(bin.file_name().unwrap(), args) {
                         Ok(Output { stdout, .. }) => {
                             let stdout = String::from_utf8(stdout).unwrap();
@@ -46,7 +73,7 @@ fn main() -> anyhow::Result<()> {
                         Err(e) => eprintln!("{e}"),
                     }
                 }
-                None => println!("{command}: command not found"),
+                None => println!("{bin}: command not found"),
             },
         }
         buf.clear();
@@ -74,6 +101,9 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-fn execute_command(bin: impl AsRef<OsStr>, args: Vec<&str>) -> std::io::Result<Output> {
-    Command::new(bin).args(args).output()
+fn execute_command(
+    bin: impl AsRef<OsStr>,
+    args: Vec<impl AsRef<OsStr>>,
+) -> std::io::Result<Output> {
+    std::process::Command::new(bin).args(args).output()
 }
