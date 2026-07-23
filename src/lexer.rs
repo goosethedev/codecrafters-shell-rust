@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Token {
     Value(String),
     Stdout(WriteMode),
     Stderr(WriteMode),
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum WriteMode {
     Append,
     Redirect,
@@ -52,12 +54,30 @@ impl<'a> Lexer<'a> {
                 '"' => {
                     self.chars.next().unwrap(); // consume opening quote
                     while let Some(ch) = self.chars.next_if(|ch| *ch != '"') {
-                        // TODO: parse special delimiter e.g. '\' '$'
-                        buf.push(ch);
+                        match ch {
+                            '\\' => match self.chars.next() {
+                                Some('\\') => buf.push('\\'),
+                                Some('"') => buf.push('"'),
+                                Some(ch) => {
+                                    buf.push('\\');
+                                    buf.push(ch)
+                                }
+                                None => unreachable!("\\ found at the end of the string"),
+                            },
+                            ch => buf.push(ch),
+                        }
                     }
                     // Consume closing quote
                     if self.chars.next_if(|ch| *ch == '"').is_none() {
                         unreachable!("unclosed single-quoted string");
+                    }
+                }
+                '\\' => {
+                    self.chars.next().unwrap(); // consume opening quote
+                    if let Some(ch) = self.chars.next() {
+                        buf.push(ch);
+                    } else {
+                        unreachable!("\\ found at the end of the string")
                     }
                 }
                 ch if ch.is_ascii_whitespace() => break,
@@ -65,5 +85,90 @@ impl<'a> Lexer<'a> {
             }
         }
         Some(Token::Value(buf))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn _test_tokenized(input: &str, expected: &[Token]) {
+        let actual: Vec<_> = Lexer::new(input).collect();
+        assert_eq!(expected, actual, "for input: {input}");
+    }
+
+    fn test_tokenized_values(input: &str, expected: &[&str]) {
+        let actual: Vec<_> = Lexer::new(input).collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(ToString::to_string)
+            .map(Token::Value)
+            .collect();
+        assert_eq!(expected, actual, "for input: {input}");
+    }
+
+    #[test]
+    fn tokenize_args_simple() {
+        let input = "echo hello world";
+        let expected = &["echo", "hello", "world"];
+        test_tokenized_values(input, expected);
+    }
+
+    #[test]
+    fn tokenize_args_single_quotes() {
+        let tests = [
+            ("echo 'hello world'", vec!["echo", "hello world"]),
+            ("'echo' 'hello world'", vec!["echo", "hello world"]),
+            (
+                "echo hi'hello world'there rust",
+                vec!["echo", "hihello worldthere", "rust"],
+            ),
+        ];
+        for (input, expected) in tests {
+            test_tokenized_values(input, &expected);
+        }
+    }
+
+    #[test]
+    fn tokenize_args_single_quotes_with_backslash() {
+        let input = r"'echo' 'hello\ world'";
+        let expected = &["echo", r"hello\ world"];
+        test_tokenized_values(input, expected);
+    }
+
+    #[test]
+    fn tokenize_args_double_quotes() {
+        let input = r#"echo "hello world""#;
+        let expected = &["echo", "hello world"];
+        test_tokenized_values(input, expected);
+    }
+
+    #[test]
+    fn tokenize_args_double_quotes_with_backslash() {
+        let tests = [
+            (r#"echo "hello\\ \world""#, vec!["echo", r#"hello\ \world"#]),
+            (
+                r#"echo hi"hello'script'\n'world""#,
+                vec!["echo", r#"hihello'script'\n'world"#],
+            ),
+            (
+                r#"echo "inside\"quotes\"""#,
+                vec!["echo", r#"inside"quotes""#],
+            ),
+        ];
+        for (input, expected) in tests {
+            test_tokenized_values(input, &expected);
+        }
+    }
+
+    #[test]
+    fn tokenize_args_backslash_outside() {
+        let tests = [
+            (r"echo hello\ \ \ world", vec!["echo", "hello   world"]),
+            (r"echo hello\     world", vec!["echo", "hello ", "world"]),
+        ];
+        for (input, expected) in tests {
+            test_tokenized_values(input, &expected);
+        }
     }
 }
