@@ -39,21 +39,19 @@ impl<'a> Lexer<'a> {
 
     fn tokenize_value(&mut self) -> Option<Token> {
         let mut buf = String::new();
-        while let Some(ch) = self.chars.peek() {
-            match *ch {
+        while let Some(ch) = self.chars.next_if(|ch| !ch.is_ascii_whitespace()) {
+            match ch {
                 '\'' => {
-                    self.chars.next().unwrap(); // consume opening quote
-                    while let Some(ch) = self.chars.next_if(|ch| *ch != '\'') {
+                    while let Some(ch) = self.chars.next_if_eq(&'\'') {
                         buf.push(ch);
                     }
                     // Consume closing quote
-                    if self.chars.next_if(|ch| *ch == '\'').is_none() {
+                    if self.chars.next_if_eq(&'\'').is_none() {
                         unreachable!("unclosed single-quoted string");
                     }
                 }
                 '"' => {
-                    self.chars.next().unwrap(); // consume opening quote
-                    while let Some(ch) = self.chars.next_if(|ch| *ch != '"') {
+                    while let Some(ch) = self.chars.next_if_eq(&'"') {
                         match ch {
                             '\\' => match self.chars.next() {
                                 Some('\\') => buf.push('\\'),
@@ -68,20 +66,18 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     // Consume closing quote
-                    if self.chars.next_if(|ch| *ch == '"').is_none() {
-                        unreachable!("unclosed single-quoted string");
+                    if self.chars.next_if_eq(&'"').is_none() {
+                        unreachable!("unclosed double-quoted string");
                     }
                 }
                 '\\' => {
-                    self.chars.next().unwrap(); // consume opening quote
                     if let Some(ch) = self.chars.next() {
                         buf.push(ch);
                     } else {
                         unreachable!("\\ found at the end of the string")
                     }
                 }
-                ch if ch.is_ascii_whitespace() => break,
-                _ => buf.push(self.chars.next().unwrap()),
+                ch => buf.push(ch),
             }
         }
         Some(Token::Value(buf))
