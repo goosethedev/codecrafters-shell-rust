@@ -5,30 +5,93 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use crate::lexer::{Lexer, Token};
+use crate::lexer::{Lexer, Token, WriteMode};
 
 const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd"];
 
 struct Command {
     bin: String,
     args: Vec<String>,
+    stdout: Option<(PathBuf, WriteMode)>,
+    stderr: Option<(PathBuf, WriteMode)>,
 }
 
 impl Command {
-    fn parse(input: &str) -> Option<Self> {
-        let mut tokens = Lexer::new(input).into_iter();
+    pub fn parse(input: &str) -> Option<Self> {
+        let mut tokens = Lexer::new(input).tokenize().ok()?.into_iter();
         let Token::Value(bin) = tokens.next()? else {
             return None;
         };
         let mut args = vec![];
+        let mut stdout = None;
+        let mut stderr = None;
 
-        for t in tokens {
+        while let Some(t) = tokens.next() {
             match t {
                 Token::Value(s) => args.push(s),
-                _ => {}
+                Token::Stdout(mode) => {
+                    let Token::Value(file) = tokens.next()? else {
+                        return None;
+                    };
+                    let file = PathBuf::from(file);
+                    stdout = Some((file, mode));
+                }
+                Token::Stderr(mode) => {
+                    let Token::Value(file) = tokens.next()? else {
+                        return None;
+                    };
+                    let file = PathBuf::from(file);
+                    stderr = Some((file, mode));
+                }
             }
         }
-        Some(Self { bin, args })
+        Some(Self {
+            bin,
+            args,
+            stderr,
+            stdout,
+        })
+    }
+
+    pub fn writeln_stdout(&self, bytes: &[u8]) {
+        self.write_stdout(&[bytes, &[b'\n']].concat());
+    }
+
+    pub fn writeln_stderr(&self, bytes: impl AsRef<[u8]>) {
+        self.write_stderr(bytes);
+        self.write_stderr("\n");
+    }
+
+    pub fn write_stdout(&self, bytes: &[u8]) {
+        if let Some((ref path, mode)) = self.stdout {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(mode == WriteMode::Append)
+                .truncate(mode == WriteMode::Redirect)
+                .open(path)
+                .unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            writer.write_all(bytes).unwrap();
+        } else {
+            print!("{}", String::from_utf8_lossy(bytes));
+        }
+    }
+
+    pub fn write_stderr(&self, bytes: impl AsRef<[u8]>) {
+        if let Some((ref path, mode)) = self.stderr {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(mode == WriteMode::Append)
+                .truncate(mode == WriteMode::Redirect)
+                .open(path)
+                .unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            writer.write_all(bytes.as_ref()).unwrap();
+        } else {
+            eprint!("{}", String::from_utf8_lossy(bytes.as_ref()));
+        }
     }
 }
 
@@ -41,24 +104,31 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().flush().unwrap();
         stdin.read_line(&mut buf)?;
 
-        let Some(Command { bin, args }) = Command::parse(&buf) else {
+        let Some(cmd) = Command::parse(&buf) else {
             continue;
         };
 
-        match bin.as_str() {
+        match cmd.bin.as_str() {
             "type" => {
-                let param = args.first().unwrap();
-                if BUILTINS.contains(&param.as_str()) {
-                    println!("{param} is a shell builtin");
-                } else if let Some(bin_path) = search_bin_in_path(&param) {
-                    println!("{param} is {}", bin_path.to_str().unwrap());
+                let param = cmd.args.first().unwrap();
+                let out = if BUILTINS.contains(&param.as_str()) {
+                    format!("{param} is a shell builtin")
+                } else if let Some(bin_path) = search_bin_in_path(param) {
+                    format!("{param} is {}", bin_path.to_str().unwrap())
                 } else {
-                    println!("{param}: not found");
-                }
+                    format!("{param}: not found")
+                };
+                cmd.writeln_stdout(out.as_bytes());
             }
-            "echo" => println!("{}", args.join(" ")),
-            "pwd" => println!("{}", std::env::current_dir().unwrap().to_str().unwrap()),
-            "cd" => match args.first().map(PathBuf::from) {
+            "echo" => cmd.writeln_stdout(cmd.args.join(" ").as_bytes()),
+            "pwd" => cmd.writeln_stdout(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .as_bytes(),
+            ),
+            "cd" => match cmd.args.first().map(PathBuf::from) {
                 Some(path) if path.is_dir() => {
                     std::env::set_current_dir(path).expect("Error changing working dir");
                 }
@@ -67,23 +137,22 @@ fn main() -> anyhow::Result<()> {
                     let path = path.to_string_lossy().replace("~", &home);
                     std::env::set_current_dir(path).expect("Error changing working dir");
                 }
-                Some(path) => println!("cd: {}: No such file or directory", path.to_str().unwrap()),
-                None => eprintln!("Error: argument required"),
+                Some(path) => cmd.writeln_stderr(format!(
+                    "cd: {}: No such file or directory",
+                    path.to_str().unwrap()
+                )),
+                None => cmd.writeln_stderr("Error: argument required"),
             },
             "exit" => break Ok(()),
             bin => match search_bin_in_path(bin) {
-                Some(bin) => {
-                    match execute_command(bin.file_name().unwrap(), args) {
-                        Ok(Output { stdout, .. }) => {
-                            let stdout = String::from_utf8(stdout).unwrap();
-                            // let stderr = String::from_utf8(stderr).unwrap();
-                            print!("{stdout}");
-                            // eprintln!("{stderr}");
-                        }
-                        Err(e) => eprintln!("{e}"),
+                Some(bin) => match execute_command(bin.file_name().unwrap(), cmd.args.clone()) {
+                    Ok(Output { stdout, stderr, .. }) => {
+                        cmd.write_stdout(&stdout);
+                        cmd.write_stderr(&stderr);
                     }
-                }
-                None => println!("{bin}: command not found"),
+                    Err(e) => cmd.writeln_stderr(e.to_string()),
+                },
+                None => cmd.writeln_stderr(format!("{bin}: command not found")),
             },
         }
         buf.clear();
