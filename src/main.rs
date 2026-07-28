@@ -5,9 +5,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use rustyline::completion::{Completer, Pair};
+use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
+use rustyline::{Config, Editor, Helper, Highlighter, Hinter, Validator};
+
 use crate::lexer::{Lexer, Token, WriteMode};
 
-const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd"];
+const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd"];
 
 struct Command {
     bin: String,
@@ -92,67 +97,112 @@ impl Command {
     }
 }
 
+#[derive(Helper, Default, Validator, Hinter, Highlighter)]
+struct ShellHelper {}
+
+impl Completer for ShellHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let start = line[..pos]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let word = &line[start..pos];
+
+        if start != 0 {
+            return Ok((start, vec![]));
+        }
+
+        let matches: Vec<_> = BUILTINS
+            .iter()
+            .filter(|b| b.starts_with(word))
+            .map(|b| Pair {
+                display: b.to_string(),
+                replacement: format!("{b} "),
+            })
+            .collect();
+
+        Ok((start, matches))
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    let stdin = std::io::stdin();
-    let mut buf = String::new();
+    let config = Config::builder()
+        .history_ignore_space(true)
+        .bell_style(rustyline::config::BellStyle::Audible)
+        .edit_mode(rustyline::EditMode::Emacs)
+        .build();
+    let mut rl = Editor::<ShellHelper, DefaultHistory>::with_config(config)?;
+    rl.set_helper(Some(ShellHelper {}));
 
     loop {
-        print!("$ ");
-        std::io::stdout().flush().unwrap();
-        stdin.read_line(&mut buf)?;
-
-        let Some(cmd) = Command::parse(&buf) else {
-            continue;
-        };
-
-        match cmd.bin.as_str() {
-            "type" => {
-                let param = cmd.args.first().unwrap();
-                let out = if BUILTINS.contains(&param.as_str()) {
-                    format!("{param} is a shell builtin")
-                } else if let Some(bin_path) = search_bin_in_path(param) {
-                    format!("{param} is {}", bin_path.to_str().unwrap())
-                } else {
-                    format!("{param}: not found")
+        match rl.readline("$ ") {
+            Ok(line) => {
+                let Some(cmd) = Command::parse(&line) else {
+                    break;
                 };
-                cmd.writeln_stdout(out.as_bytes());
-            }
-            "echo" => cmd.writeln_stdout(cmd.args.join(" ").as_bytes()),
-            "pwd" => cmd.writeln_stdout(
-                std::env::current_dir()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .as_bytes(),
-            ),
-            "cd" => match cmd.args.first().map(PathBuf::from) {
-                Some(path) if path.is_dir() => {
-                    std::env::set_current_dir(path).expect("Error changing working dir");
-                }
-                Some(path) if path.starts_with("~") => {
-                    let home = std::env::var("HOME").expect("HOME var not found");
-                    let path = path.to_string_lossy().replace("~", &home);
-                    std::env::set_current_dir(path).expect("Error changing working dir");
-                }
-                Some(path) => cmd.writeln_stderr(
-                    format!("cd: {}: No such file or directory", path.to_str().unwrap()).as_bytes(),
-                ),
-                None => cmd.writeln_stderr("Error: argument required".as_bytes()),
-            },
-            "exit" => break Ok(()),
-            bin => match search_bin_in_path(bin) {
-                Some(bin) => match execute_command(bin.file_name().unwrap(), cmd.args.clone()) {
-                    Ok(Output { stdout, stderr, .. }) => {
-                        cmd.write_stdout(&stdout);
-                        cmd.write_stderr(&stderr);
+
+                match cmd.bin.as_str() {
+                    "type" => {
+                        let param = cmd.args.first().unwrap();
+                        let out = if BUILTINS.contains(&param.as_str()) {
+                            format!("{param} is a shell builtin")
+                        } else if let Some(bin_path) = search_bin_in_path(param) {
+                            format!("{param} is {}", bin_path.to_str().unwrap())
+                        } else {
+                            format!("{param}: not found")
+                        };
+                        cmd.writeln_stdout(out.as_bytes());
                     }
-                    Err(e) => cmd.writeln_stderr(e.to_string().as_bytes()),
-                },
-                None => cmd.writeln_stderr(format!("{bin}: command not found").as_bytes()),
-            },
-        }
-        buf.clear();
+                    "echo" => cmd.writeln_stdout(cmd.args.join(" ").as_bytes()),
+                    "pwd" => cmd.writeln_stdout(
+                        std::env::current_dir()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .as_bytes(),
+                    ),
+                    "cd" => match cmd.args.first().map(PathBuf::from) {
+                        Some(path) if path.is_dir() => {
+                            std::env::set_current_dir(path).expect("Error changing working dir");
+                        }
+                        Some(path) if path.starts_with("~") => {
+                            let home = std::env::var("HOME").expect("HOME var not found");
+                            let path = path.to_string_lossy().replace("~", &home);
+                            std::env::set_current_dir(path).expect("Error changing working dir");
+                        }
+                        Some(path) => cmd.writeln_stderr(
+                            format!("cd: {}: No such file or directory", path.to_str().unwrap())
+                                .as_bytes(),
+                        ),
+                        None => cmd.writeln_stderr("Error: argument required".as_bytes()),
+                    },
+                    "exit" => break,
+                    bin => match search_bin_in_path(bin) {
+                        Some(bin) => {
+                            match execute_command(bin.file_name().unwrap(), cmd.args.clone()) {
+                                Ok(Output { stdout, stderr, .. }) => {
+                                    cmd.write_stdout(&stdout);
+                                    cmd.write_stderr(&stderr);
+                                }
+                                Err(e) => cmd.writeln_stderr(e.to_string().as_bytes()),
+                            }
+                        }
+                        None => cmd.writeln_stderr(format!("{bin}: command not found").as_bytes()),
+                    },
+                }
+            }
+            Err(ReadlineError::Interrupted) => continue,
+            Err(_) => break,
+        };
     }
+    Ok(())
 }
 
 fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
