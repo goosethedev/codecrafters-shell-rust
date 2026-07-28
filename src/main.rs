@@ -12,8 +12,8 @@ const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd"];
 struct Command {
     bin: String,
     args: Vec<String>,
-    stdout: Option<(PathBuf, WriteMode)>,
-    stderr: Option<(PathBuf, WriteMode)>,
+    stdout: Option<std::fs::File>,
+    stderr: Option<std::fs::File>,
 }
 
 impl Command {
@@ -33,15 +33,27 @@ impl Command {
                     let Token::Value(file) = tokens.next()? else {
                         return None;
                     };
-                    let file = PathBuf::from(file);
-                    stdout = Some((file, mode));
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(mode == WriteMode::Append)
+                        .truncate(mode == WriteMode::Redirect)
+                        .open(file)
+                        .unwrap();
+                    stdout = Some(file);
                 }
                 Token::Stderr(mode) => {
                     let Token::Value(file) = tokens.next()? else {
                         return None;
                     };
-                    let file = PathBuf::from(file);
-                    stderr = Some((file, mode));
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(mode == WriteMode::Append)
+                        .truncate(mode == WriteMode::Redirect)
+                        .open(file)
+                        .unwrap();
+                    stderr = Some(file);
                 }
             }
         }
@@ -57,20 +69,12 @@ impl Command {
         self.write_stdout(&[bytes, &[b'\n']].concat());
     }
 
-    pub fn writeln_stderr(&self, bytes: impl AsRef<[u8]>) {
-        self.write_stderr(bytes);
-        self.write_stderr("\n");
+    pub fn writeln_stderr(&self, bytes: &[u8]) {
+        self.write_stderr(&[bytes, &[b'\n']].concat());
     }
 
     pub fn write_stdout(&self, bytes: &[u8]) {
-        if let Some((ref path, mode)) = self.stdout {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(mode == WriteMode::Append)
-                .truncate(mode == WriteMode::Redirect)
-                .open(path)
-                .unwrap();
+        if let Some(ref file) = self.stdout {
             let mut writer = std::io::BufWriter::new(file);
             writer.write_all(bytes).unwrap();
         } else {
@@ -78,19 +82,12 @@ impl Command {
         }
     }
 
-    pub fn write_stderr(&self, bytes: impl AsRef<[u8]>) {
-        if let Some((ref path, mode)) = self.stderr {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(mode == WriteMode::Append)
-                .truncate(mode == WriteMode::Redirect)
-                .open(path)
-                .unwrap();
+    pub fn write_stderr(&self, bytes: &[u8]) {
+        if let Some(ref file) = self.stderr {
             let mut writer = std::io::BufWriter::new(file);
-            writer.write_all(bytes.as_ref()).unwrap();
+            writer.write_all(bytes).unwrap();
         } else {
-            eprint!("{}", String::from_utf8_lossy(bytes.as_ref()));
+            eprint!("{}", String::from_utf8_lossy(bytes));
         }
     }
 }
@@ -137,11 +134,10 @@ fn main() -> anyhow::Result<()> {
                     let path = path.to_string_lossy().replace("~", &home);
                     std::env::set_current_dir(path).expect("Error changing working dir");
                 }
-                Some(path) => cmd.writeln_stderr(format!(
-                    "cd: {}: No such file or directory",
-                    path.to_str().unwrap()
-                )),
-                None => cmd.writeln_stderr("Error: argument required"),
+                Some(path) => cmd.writeln_stderr(
+                    format!("cd: {}: No such file or directory", path.to_str().unwrap()).as_bytes(),
+                ),
+                None => cmd.writeln_stderr("Error: argument required".as_bytes()),
             },
             "exit" => break Ok(()),
             bin => match search_bin_in_path(bin) {
@@ -150,9 +146,9 @@ fn main() -> anyhow::Result<()> {
                         cmd.write_stdout(&stdout);
                         cmd.write_stderr(&stderr);
                     }
-                    Err(e) => cmd.writeln_stderr(e.to_string()),
+                    Err(e) => cmd.writeln_stderr(e.to_string().as_bytes()),
                 },
-                None => cmd.writeln_stderr(format!("{bin}: command not found")),
+                None => cmd.writeln_stderr(format!("{bin}: command not found").as_bytes()),
             },
         }
         buf.clear();
