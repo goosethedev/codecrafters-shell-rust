@@ -1,104 +1,23 @@
+mod command;
 mod lexer;
 
 use std::ffi::OsStr;
-use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
-use rustyline::{Config, Editor, Helper, Highlighter, Hinter, Validator};
-
-use crate::lexer::{Lexer, Token, WriteMode};
+use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
+use trie_rs::{Trie, TrieBuilder};
 
 const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd"];
 
-struct Command {
-    bin: String,
-    args: Vec<String>,
-    stdout: Option<std::fs::File>,
-    stderr: Option<std::fs::File>,
+#[derive(Helper, Validator, Hinter, Highlighter)]
+struct ShellHelper {
+    path_execs: Trie<u8>,
 }
-
-impl Command {
-    pub fn parse(input: &str) -> Option<Self> {
-        let mut tokens = Lexer::new(input).tokenize().ok()?.into_iter();
-        let Token::Value(bin) = tokens.next()? else {
-            return None;
-        };
-        let mut args = vec![];
-        let mut stdout = None;
-        let mut stderr = None;
-
-        while let Some(t) = tokens.next() {
-            match t {
-                Token::Value(s) => args.push(s),
-                Token::Stdout(mode) => {
-                    let Token::Value(file) = tokens.next()? else {
-                        return None;
-                    };
-                    let file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .append(mode == WriteMode::Append)
-                        .truncate(mode == WriteMode::Redirect)
-                        .open(file)
-                        .unwrap();
-                    stdout = Some(file);
-                }
-                Token::Stderr(mode) => {
-                    let Token::Value(file) = tokens.next()? else {
-                        return None;
-                    };
-                    let file = std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .append(mode == WriteMode::Append)
-                        .truncate(mode == WriteMode::Redirect)
-                        .open(file)
-                        .unwrap();
-                    stderr = Some(file);
-                }
-            }
-        }
-        Some(Self {
-            bin,
-            args,
-            stderr,
-            stdout,
-        })
-    }
-
-    pub fn writeln_stdout(&self, bytes: &[u8]) {
-        self.write_stdout(&[bytes, &[b'\n']].concat());
-    }
-
-    pub fn writeln_stderr(&self, bytes: &[u8]) {
-        self.write_stderr(&[bytes, &[b'\n']].concat());
-    }
-
-    pub fn write_stdout(&self, bytes: &[u8]) {
-        if let Some(ref file) = self.stdout {
-            let mut writer = std::io::BufWriter::new(file);
-            writer.write_all(bytes).unwrap();
-        } else {
-            print!("{}", String::from_utf8_lossy(bytes));
-        }
-    }
-
-    pub fn write_stderr(&self, bytes: &[u8]) {
-        if let Some(ref file) = self.stderr {
-            let mut writer = std::io::BufWriter::new(file);
-            writer.write_all(bytes).unwrap();
-        } else {
-            eprint!("{}", String::from_utf8_lossy(bytes));
-        }
-    }
-}
-
-#[derive(Helper, Default, Validator, Hinter, Highlighter)]
-struct ShellHelper {}
 
 impl Completer for ShellHelper {
     type Candidate = Pair;
@@ -115,16 +34,17 @@ impl Completer for ShellHelper {
             .unwrap_or(0);
         let word = &line[start..pos];
 
+        // Only autocomplete the first word
         if start != 0 {
             return Ok((start, vec![]));
         }
 
-        let matches: Vec<_> = BUILTINS
-            .iter()
-            .filter(|b| b.starts_with(word))
-            .map(|b| Pair {
-                display: b.to_string(),
-                replacement: format!("{b} "),
+        let matches = self
+            .path_execs
+            .predictive_search(word)
+            .map(|res: String| Pair {
+                display: res.clone(),
+                replacement: format!("{res} "),
             })
             .collect();
 
@@ -135,16 +55,19 @@ impl Completer for ShellHelper {
 fn main() -> anyhow::Result<()> {
     let config = Config::builder()
         .history_ignore_space(true)
+        .completion_type(CompletionType::List)
         .bell_style(rustyline::config::BellStyle::Audible)
         .edit_mode(rustyline::EditMode::Emacs)
         .build();
     let mut rl = Editor::<ShellHelper, DefaultHistory>::with_config(config)?;
-    rl.set_helper(Some(ShellHelper {}));
+
+    let path_execs = scan_path_executables();
+    rl.set_helper(Some(ShellHelper { path_execs }));
 
     loop {
         match rl.readline("$ ") {
             Ok(line) => {
-                let Some(cmd) = Command::parse(&line) else {
+                let Some(cmd) = crate::command::Command::parse(&line) else {
                     break;
                 };
 
@@ -205,6 +128,26 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn scan_path_executables() -> Trie<u8> {
+    let mut builder = TrieBuilder::new();
+    // First, include all built-ins
+    BUILTINS.iter().for_each(|b| builder.push(b));
+
+    let path_var = std::env::var_os("PATH").expect("Unable to find PATH variable");
+    for dir in std::env::split_paths(&path_var) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let bin = entry.path();
+            if is_executable(&bin) {
+                builder.push(bin.file_name().unwrap().as_bytes());
+            }
+        }
+    }
+    builder.build()
+}
+
 fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH").expect("Unable to find PATH variable");
 
@@ -217,10 +160,10 @@ fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
     None
 }
 
-fn is_executable(path: &Path) -> bool {
+fn is_executable(path: impl AsRef<Path>) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
-    match path.metadata() {
+    match path.as_ref().metadata() {
         Ok(meta) if meta.is_file() => meta.permissions().mode() & 0o111 != 0,
         _ => false,
     }
