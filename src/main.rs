@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use rustyline::completion::{Completer, Pair};
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
@@ -17,6 +17,7 @@ const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd"];
 #[derive(Helper, Validator, Hinter, Highlighter)]
 struct ShellHelper {
     path_execs: Trie<u8>,
+    filename_completer: FilenameCompleter,
 }
 
 impl Completer for ShellHelper {
@@ -26,7 +27,7 @@ impl Completer for ShellHelper {
         &self,
         line: &str,
         pos: usize,
-        _ctx: &rustyline::Context<'_>,
+        ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
         let start = line[..pos]
             .rfind(char::is_whitespace)
@@ -34,21 +35,30 @@ impl Completer for ShellHelper {
             .unwrap_or(0);
         let word = &line[start..pos];
 
-        // Only autocomplete the first word
-        if start != 0 {
-            return Ok((start, vec![]));
+        if start == 0 {
+            // If completing the first word, search for binaries
+            let matches = self
+                .path_execs
+                .predictive_search(word)
+                .map(|res: String| Pair {
+                    display: res.clone(),
+                    replacement: format!("{res} "),
+                })
+                .collect();
+            Ok((start, matches))
+        } else {
+            // Else, search for filenames
+            let mut res = self.filename_completer.complete(line, pos, ctx)?;
+
+            // Append a space to not-dir completions
+            for pair in res.1.iter_mut() {
+                let filepath = std::env::current_dir().unwrap().join(&pair.display);
+                if !filepath.is_dir() {
+                    pair.replacement.push(' ');
+                }
+            }
+            Ok(res)
         }
-
-        let matches = self
-            .path_execs
-            .predictive_search(word)
-            .map(|res: String| Pair {
-                display: res.clone(),
-                replacement: format!("{res} "),
-            })
-            .collect();
-
-        Ok((start, matches))
     }
 }
 
@@ -61,8 +71,10 @@ fn main() -> anyhow::Result<()> {
         .build();
     let mut rl = Editor::<ShellHelper, DefaultHistory>::with_config(config)?;
 
-    let path_execs = scan_path_executables();
-    rl.set_helper(Some(ShellHelper { path_execs }));
+    rl.set_helper(Some(ShellHelper {
+        path_execs: scan_path_executables(),
+        filename_completer: FilenameCompleter::new(),
+    }));
 
     loop {
         match rl.readline("$ ") {
