@@ -1,6 +1,7 @@
 mod command;
 mod lexer;
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -12,12 +13,52 @@ use rustyline::history::DefaultHistory;
 use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
 use trie_rs::{Trie, TrieBuilder};
 
-const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd"];
+const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd", "complete"];
 
 #[derive(Helper, Validator, Hinter, Highlighter)]
 struct ShellHelper {
     path_execs: Trie<u8>,
     filename_completer: FilenameCompleter,
+    completion_scripts: HashMap<String, PathBuf>,
+}
+
+impl ShellHelper {
+    fn get_completion_script(&self, command: &str) -> Option<&PathBuf> {
+        self.completion_scripts.get(command)
+    }
+
+    fn register_custom_completion(&mut self, command: &str, script_path: &str) {
+        let script = PathBuf::from(script_path);
+        self.completion_scripts.insert(command.to_string(), script);
+    }
+
+    fn unregister_custom_completion(&mut self, command: &str) {
+        let _ = self.completion_scripts.remove(command);
+    }
+
+    fn get_custom_completions(
+        &self,
+        command: &str,
+        partial: &str,
+        previous: &str,
+        full_line: &str,
+        pos: usize,
+    ) -> Option<Vec<String>> {
+        let script = self.get_completion_script(command)?;
+        let output = std::process::Command::new(script)
+            .args([command, partial, previous])
+            .env("COMP_LINE", full_line)
+            .env("COMP_POINT", pos.to_string())
+            .output()
+            .unwrap();
+        Some(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(ToString::to_string)
+                .collect(),
+        )
+    }
 }
 
 impl Completer for ShellHelper {
@@ -45,22 +86,40 @@ impl Completer for ShellHelper {
                     replacement: format!("{res} "),
                 })
                 .collect();
-            Ok((start, matches))
-        } else {
-            // Else, search for filenames
-            let mut res = self.filename_completer.complete(line, pos, ctx)?;
+            return Ok((start, matches));
+        };
 
-            // Append a space to not-dir completions
-            for pair in res.1.iter_mut() {
-                let filepath = std::env::current_dir().unwrap().join(&pair.replacement);
-                if filepath.is_file() {
-                    pair.replacement.push(' ');
-                } else {
-                    pair.display.push('/');
-                }
-            }
-            Ok(res)
+        // Else, try getting custom completions for the binary
+        let (bin, _) = line.split_once(" ").unwrap();
+        let (_, prev) = line[..start]
+            .trim_end()
+            .rsplit_once(" ")
+            .unwrap_or(("", ""));
+        if let Some(completions) = self.get_custom_completions(bin, word, prev, line, pos) {
+            let matches = completions
+                .iter()
+                .filter(|c| c.starts_with(word))
+                .map(|c| Pair {
+                    display: c.clone(),
+                    replacement: format!("{c} "),
+                })
+                .collect();
+            return Ok((start, matches));
         }
+
+        // Else, search for filenames
+        let mut res = self.filename_completer.complete(line, pos, ctx)?;
+
+        // Append a space to not-dir completions and a "/" to dir list alternatives
+        for pair in res.1.iter_mut() {
+            let filepath = std::env::current_dir().unwrap().join(&pair.replacement);
+            if filepath.is_file() {
+                pair.replacement.push(' ');
+            } else {
+                pair.display.push('/');
+            }
+        }
+        Ok(res)
     }
 }
 
@@ -76,6 +135,7 @@ fn main() -> anyhow::Result<()> {
     rl.set_helper(Some(ShellHelper {
         path_execs: scan_path_executables(),
         filename_completer: FilenameCompleter::new(),
+        completion_scripts: HashMap::new(),
     }));
 
     loop {
@@ -120,6 +180,39 @@ fn main() -> anyhow::Result<()> {
                         ),
                         None => cmd.writeln_stderr("Error: argument required".as_bytes()),
                     },
+                    "complete" => {
+                        let mut args = cmd.args.iter();
+                        if let Some(opt) = args.next() {
+                            match opt.as_str() {
+                                "-p" => {
+                                    let bin = args.next().unwrap();
+                                    if let Some(script) =
+                                        rl.helper().unwrap().get_completion_script(bin)
+                                    {
+                                        let script = script.to_str().unwrap();
+                                        let msg = format!("complete -C '{script}' {bin}");
+                                        cmd.writeln_stdout(&msg);
+                                    } else {
+                                        cmd.writeln_stderr(format!(
+                                            "complete: {bin}: no completion specification"
+                                        ));
+                                    };
+                                }
+                                "-C" => {
+                                    let script_path = args.next().unwrap();
+                                    let bin = args.next().unwrap();
+                                    rl.helper_mut()
+                                        .unwrap()
+                                        .register_custom_completion(bin, script_path);
+                                }
+                                "-r" => {
+                                    let bin = args.next().unwrap();
+                                    rl.helper_mut().unwrap().unregister_custom_completion(bin);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     "exit" => break,
                     bin => match search_bin_in_path(bin) {
                         Some(bin) => {
