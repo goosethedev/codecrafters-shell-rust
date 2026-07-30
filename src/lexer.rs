@@ -5,6 +5,7 @@ pub enum Token {
     Value(String),
     Stdout(WriteMode),
     Stderr(WriteMode),
+    Ampersand,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -39,7 +40,11 @@ impl<'a> Lexer<'a> {
         let mut tokens = vec![];
 
         while self.peek().is_some() {
-            let Some(token) = self.tokenize_redir().or_else(|| self.tokenize_value()) else {
+            let Some(token) = self
+                .tokenize_redir()
+                .or_else(|| self.tokenize_single_char())
+                .or_else(|| self.tokenize_value())
+            else {
                 break;
             };
             tokens.push(token);
@@ -108,6 +113,15 @@ impl<'a> Lexer<'a> {
             }
         }
         Some(Token::Value(buf))
+    }
+
+    fn tokenize_single_char(&mut self) -> Option<Token> {
+        let token = match self.peek()? {
+            '&' => Token::Ampersand,
+            _ => return None,
+        };
+        self.next().unwrap();
+        Some(token)
     }
 
     fn skip_whitespace(&mut self) {

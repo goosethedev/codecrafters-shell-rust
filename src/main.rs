@@ -1,4 +1,5 @@
 mod command;
+mod jobs;
 mod lexer;
 
 use std::collections::HashMap;
@@ -13,7 +14,9 @@ use rustyline::history::DefaultHistory;
 use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
 use trie_rs::{Trie, TrieBuilder};
 
-const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd", "complete"];
+use crate::jobs::JobTable;
+
+const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd", "complete", "jobs"];
 
 #[derive(Helper, Validator, Hinter, Highlighter)]
 struct ShellHelper {
@@ -76,8 +79,8 @@ impl Completer for ShellHelper {
             .unwrap_or(0);
         let word = &line[start..pos];
 
+        // If completing the first word, search for binaries
         if start == 0 {
-            // If completing the first word, search for binaries
             let matches = self
                 .path_execs
                 .predictive_search(word)
@@ -132,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         .bell_style(rustyline::config::BellStyle::Audible)
         .edit_mode(rustyline::EditMode::Emacs)
         .build();
+
     let mut rl = Editor::<ShellHelper, DefaultHistory>::with_config(config)?;
 
     rl.set_helper(Some(ShellHelper {
@@ -140,11 +144,13 @@ fn main() -> anyhow::Result<()> {
         completion_scripts: HashMap::new(),
     }));
 
+    let mut jobs = JobTable::new();
+
     loop {
         match rl.readline("$ ") {
             Ok(line) => {
                 let Some(cmd) = crate::command::Command::parse(&line) else {
-                    break;
+                    continue;
                 };
 
                 match cmd.bin.as_str() {
@@ -215,9 +221,17 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+                    "jobs" => {
+                        jobs.poll();
+                        jobs.list_and_reap(false);
+                    }
                     "exit" => break,
                     bin => match search_bin_in_path(bin) {
                         Some(bin) => {
+                            if cmd.bg {
+                                jobs.spawn_background(cmd).unwrap();
+                                continue;
+                            }
                             match execute_command(bin.file_name().unwrap(), cmd.args.clone()) {
                                 Ok(Output { stdout, stderr, .. }) => {
                                     cmd.write_stdout(&stdout);
@@ -231,8 +245,14 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             Err(ReadlineError::Interrupted) => continue,
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("{e}");
+                break;
+            }
         };
+
+        jobs.poll();
+        jobs.list_and_reap(true);
     }
     Ok(())
 }

@@ -9,9 +9,11 @@ pub struct Command {
     pub args: Vec<String>,
     pub stdout: Option<std::fs::File>,
     pub stderr: Option<std::fs::File>,
+    pub bg: bool,
 }
 
 impl Command {
+    // TODO: proper error handling
     pub fn parse(input: &str) -> Option<Self> {
         let mut tokens = Lexer::new(input).tokenize().ok()?.into_iter();
         let Token::Value(bin) = tokens.next()? else {
@@ -20,6 +22,7 @@ impl Command {
         let mut args = vec![];
         let mut stdout = None;
         let mut stderr = None;
+        let mut bg = false;
 
         while let Some(t) = tokens.next() {
             match t {
@@ -50,6 +53,7 @@ impl Command {
                         .unwrap();
                     stderr = Some(file);
                 }
+                Token::Ampersand => bg = true,
             }
         }
         Some(Self {
@@ -57,7 +61,13 @@ impl Command {
             args,
             stderr,
             stdout,
+            bg,
         })
+    }
+
+    pub fn prettify(&self) -> String {
+        let args = self.args.join(" ");
+        format!("{} {}", self.bin, args)
     }
 
     pub fn writeln_stdout(&self, bytes: impl AsRef<[u8]>) {
