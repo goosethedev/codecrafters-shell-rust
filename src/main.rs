@@ -91,10 +91,12 @@ impl Completer for ShellHelper {
 
         // Else, try getting custom completions for the binary
         let (bin, _) = line.split_once(" ").unwrap();
-        let (_, prev) = line[..start]
+        let prev = line[..start]
             .trim_end()
-            .rsplit_once(" ")
-            .unwrap_or(("", ""));
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prev = &line[prev..start].trim_end();
         if let Some(completions) = self.get_custom_completions(bin, word, prev, line, pos) {
             let matches = completions
                 .iter()
