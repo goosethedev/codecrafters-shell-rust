@@ -52,8 +52,9 @@ impl Completer for ShellHelper {
 
             // Append a space to not-dir completions
             for pair in res.1.iter_mut() {
-                let filepath = std::env::current_dir().unwrap().join(&pair.display);
-                if !filepath.is_dir() {
+                // dbg!(&pair.display);
+                let filepath = std::env::current_dir().unwrap().join(&pair.replacement);
+                if filepath.is_file() {
                     pair.replacement.push(' ');
                 }
             }
