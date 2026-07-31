@@ -298,7 +298,7 @@ fn main() -> anyhow::Result<()> {
                             v => {
                                 let (var_name, value) = v.split_once("=").unwrap();
                                 if !is_valid_identifier(var_name) {
-                                    eprintln!("declare: {var_name}: not a valid identifier");
+                                    eprintln!(r"declare: `{v}': not a valid identifier");
                                     continue;
                                 }
                                 var_store.insert(var_name.to_string(), value.to_string());
