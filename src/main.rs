@@ -130,6 +130,8 @@ impl Completer for ShellHelper {
     }
 }
 
+// NOTE: Saving history to file uses a custom iterator to avoid setting the #V2 header
+// that makes CodeCrafters' tests fail.
 fn main() -> anyhow::Result<()> {
     let config = Config::builder()
         .history_ignore_space(true)
@@ -149,9 +151,12 @@ fn main() -> anyhow::Result<()> {
     let mut jobs = JobTable::new();
 
     // Try to load history from HISTFILE
-    if let Some(hist_path) = std::env::var_os("HISTFILE") {
+    let saved_count = if let Some(hist_path) = std::env::var_os("HISTFILE") {
         let _ = rl.load_history(&hist_path);
-    }
+        rl.history().len()
+    } else {
+        0
+    };
 
     loop {
         match rl.readline("$ ") {
@@ -235,16 +240,21 @@ fn main() -> anyhow::Result<()> {
                     }
                     "history" => {
                         let mut args = cmd.args.iter();
-                        match args.next().and_then(|v| Some(v.as_str())) {
+                        match args.next().map(|v| v.as_str()) {
                             Some("-r") => {
                                 // Read from file
                                 let path = args.next().unwrap();
                                 let _ = rl.load_history(path);
                             }
                             Some("-w") => {
+                                use std::io::Write;
                                 // Write to file
                                 let path = args.next().unwrap();
-                                let _ = rl.save_history(path);
+                                let file = std::fs::File::create(path).unwrap();
+                                let mut writer = std::io::BufWriter::new(file);
+                                for entry in rl.history() {
+                                    writeln!(writer, "{entry}").unwrap();
+                                }
                             }
                             Some(n) => {
                                 // List last n
@@ -268,7 +278,16 @@ fn main() -> anyhow::Result<()> {
                     "exit" => {
                         // Try to save history from HISTFILE
                         if let Some(hist_path) = std::env::var_os("HISTFILE") {
-                            rl.append_history(&hist_path).unwrap();
+                            use std::io::Write;
+                            let file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(hist_path)
+                                .unwrap();
+                            let mut writer = std::io::BufWriter::new(file);
+                            for entry in rl.history().iter().skip(saved_count) {
+                                writeln!(writer, "{entry}").unwrap();
+                            }
                         }
 
                         break;

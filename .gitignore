@@ -11,4 +11,4 @@ target/
 
 # Test TXTs and dir
 testdir/
-.txt
+*.txt
