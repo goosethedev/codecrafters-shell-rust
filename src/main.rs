@@ -10,13 +10,15 @@ use std::process::Output;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
+use rustyline::history::{DefaultHistory, History};
 use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
 use trie_rs::{Trie, TrieBuilder};
 
 use crate::jobs::JobTable;
 
-const BUILTINS: &[&str] = &["echo", "type", "exit", "pwd", "cd", "complete", "jobs"];
+const BUILTINS: &[&str] = &[
+    "echo", "type", "exit", "pwd", "cd", "complete", "jobs", "history",
+];
 
 #[derive(Helper, Validator, Hinter, Highlighter)]
 struct ShellHelper {
@@ -149,6 +151,7 @@ fn main() -> anyhow::Result<()> {
     loop {
         match rl.readline("$ ") {
             Ok(line) => {
+                rl.add_history_entry(&line).unwrap();
                 let Some(cmd) = crate::command::Command::parse(&line) else {
                     continue;
                 };
@@ -224,6 +227,19 @@ fn main() -> anyhow::Result<()> {
                     "jobs" => {
                         jobs.poll();
                         jobs.list_and_reap(false);
+                    }
+                    "history" => {
+                        let n = match cmd.args.iter().next().map(|n| n.parse::<usize>()) {
+                            Some(Ok(n)) => rl.history().len() - n,
+                            Some(Err(_)) => {
+                                eprintln!("history: numeric argument required");
+                                continue;
+                            }
+                            None => 0,
+                        };
+                        for (i, entry) in rl.history().iter().skip(n).enumerate() {
+                            println!("{:>5}  {entry}", n + i + 1);
+                        }
                     }
                     "exit" => break,
                     bin => match search_bin_in_path(bin) {
