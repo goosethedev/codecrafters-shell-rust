@@ -28,7 +28,12 @@ impl Command {
 
         while let Some(t) = tokens.next() {
             match t {
-                Token::Word(values) => args.push(resolve_word(values, kv)),
+                Token::Word(values) => {
+                    let word = resolve_word(values, kv);
+                    if !word.is_empty() {
+                        args.push(word);
+                    }
+                }
                 Token::Stdout(mode) => {
                     let Token::Word(values) = tokens.next()? else {
                         return None;
