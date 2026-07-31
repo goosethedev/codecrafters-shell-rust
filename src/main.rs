@@ -17,7 +17,7 @@ use trie_rs::{Trie, TrieBuilder};
 use crate::jobs::JobTable;
 
 const BUILTINS: &[&str] = &[
-    "echo", "type", "exit", "pwd", "cd", "complete", "jobs", "history",
+    "echo", "type", "exit", "pwd", "cd", "complete", "jobs", "history", "declare",
 ];
 
 #[derive(Helper, Validator, Hinter, Highlighter)]
@@ -130,6 +130,8 @@ impl Completer for ShellHelper {
     }
 }
 
+pub type VarStore = HashMap<String, String>;
+
 // NOTE: Saving history to file uses a custom iterator to avoid setting the #V2 header
 // that makes CodeCrafters' tests fail.
 fn main() -> anyhow::Result<()> {
@@ -162,11 +164,14 @@ fn main() -> anyhow::Result<()> {
     // Keep track of last appended history to any file
     let mut last_append_at = 0;
 
+    // Keep track of declared variables
+    let mut var_store = VarStore::new();
+
     loop {
         match rl.readline("$ ") {
             Ok(line) => {
                 rl.add_history_entry(&line).unwrap();
-                let Some(cmd) = crate::command::Command::parse(&line) else {
+                let Some(cmd) = crate::command::Command::parse(&line, &var_store) else {
                     continue;
                 };
 
@@ -280,6 +285,26 @@ fn main() -> anyhow::Result<()> {
                             }
                         };
                     }
+                    "declare" => {
+                        let mut args = cmd.args.iter();
+                        match args.next().unwrap().as_str() {
+                            "-p" => {
+                                let var_name = args.next().unwrap();
+                                match var_store.get(var_name) {
+                                    Some(v) => println!(r#"declare -- {var_name}="{v}""#),
+                                    None => eprintln!("declare: {var_name}: not found"),
+                                };
+                            }
+                            v => {
+                                let (var_name, value) = v.split_once("=").unwrap();
+                                if !is_valid_identifier(var_name) {
+                                    eprintln!("declare: {var_name}: not a valid identifier");
+                                    continue;
+                                }
+                                var_store.insert(var_name.to_string(), value.to_string());
+                            }
+                        }
+                    }
                     "exit" => {
                         // Try to save history from HISTFILE
                         if let Some(hist_path) = std::env::var_os("HISTFILE") {
@@ -386,4 +411,12 @@ fn write_history(
         writeln!(writer, "{entry}").unwrap();
     }
     Ok(())
+}
+
+fn is_valid_identifier(value: &str) -> bool {
+    let first = value.as_bytes().get(0).unwrap();
+    (first.is_ascii_alphabetic() || *first == b'_')
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }

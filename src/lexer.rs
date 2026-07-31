@@ -2,10 +2,16 @@
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Token {
-    Value(String),
+    Word(Vec<Value>),
     Stdout(WriteMode),
     Stderr(WriteMode),
     Ampersand,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Value {
+    Expansion(String),
+    Literal(String),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -43,7 +49,7 @@ impl<'a> Lexer<'a> {
             let Some(token) = self
                 .tokenize_redir()
                 .or_else(|| self.tokenize_single_char())
-                .or_else(|| self.tokenize_value())
+                .or_else(|| self.tokenize_word())
             else {
                 break;
             };
@@ -69,18 +75,25 @@ impl<'a> Lexer<'a> {
         Some(token)
     }
 
-    fn tokenize_value(&mut self) -> Option<Token> {
+    fn tokenize_word(&mut self) -> Option<Token> {
+        let mut values = vec![];
         let mut buf = String::new();
         while let Some(ch) = self.next_if(|ch| !ch.is_ascii_whitespace()) {
             match ch {
+                '$' => {
+                    if !buf.is_empty() {
+                        values.push(Value::Literal(std::mem::take(&mut buf)));
+                    }
+                    let var_name = if self.next_if_eq('{').is_some() {
+                        self.take_until_closing('}')
+                    } else {
+                        self.take_while(|ch| !ch.is_ascii_whitespace())
+                    };
+                    values.push(Value::Expansion(var_name));
+                }
                 '\'' => {
-                    while let Some(ch) = self.next_if(|ch| ch != '\'') {
-                        buf.push(ch);
-                    }
-                    // Consume closing quote
-                    if self.next_if_eq('\'').is_none() {
-                        unreachable!("unclosed single-quoted string");
-                    }
+                    let value = self.take_until_closing('\'');
+                    buf.push_str(&value);
                 }
                 '"' => {
                     while let Some(ch) = self.next_if(|ch| ch != '"') {
@@ -112,7 +125,11 @@ impl<'a> Lexer<'a> {
                 ch => buf.push(ch),
             }
         }
-        Some(Token::Value(buf))
+        if !buf.is_empty() {
+            values.push(Value::Literal(std::mem::take(&mut buf)));
+        }
+
+        Some(Token::Word(values))
     }
 
     fn tokenize_single_char(&mut self) -> Option<Token> {
@@ -122,6 +139,23 @@ impl<'a> Lexer<'a> {
         };
         self.next().unwrap();
         Some(token)
+    }
+
+    fn take_until_closing(&mut self, delim: char) -> String {
+        let value = self.take_while(|ch| ch != delim);
+        // Consume closing quote
+        if self.next_if_eq(delim).is_none() {
+            unreachable!("missing unclosed delimiter: {delim}");
+        }
+        value
+    }
+
+    fn take_while(&mut self, f: impl Fn(char) -> bool) -> String {
+        let mut buf = String::new();
+        while let Some(ch) = self.next_if(|ch| f(ch)) {
+            buf.push(ch);
+        }
+        buf
     }
 
     fn skip_whitespace(&mut self) {
@@ -162,6 +196,7 @@ impl<'a> Lexer<'a> {
 #[cfg(test)]
 mod tests {
     use super::Token::*;
+    use super::Value::*;
     use super::WriteMode::*;
     use super::*;
 
@@ -174,8 +209,7 @@ mod tests {
         let actual = Lexer::new(input).tokenize();
         let expected: Vec<_> = expected
             .into_iter()
-            .map(ToString::to_string)
-            .map(Token::Value)
+            .map(|v| Word(vec![Literal(v.to_string())]))
             .collect();
         assert_eq!(Ok(expected), actual, "for input: {input}");
     }
@@ -251,61 +285,86 @@ mod tests {
             (
                 r"hello > file.txt",
                 vec![
-                    Value("hello".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
                     Stdout(Redirect),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
             (
                 r"hello >>file.txt",
                 vec![
-                    Value("hello".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
                     Stdout(Append),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
             (
                 r"hello 1> file.txt",
                 vec![
-                    Value("hello".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
                     Stdout(Redirect),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
             (
                 r"hello 2> file.txt",
                 vec![
-                    Value("hello".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
                     Stderr(Redirect),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
             (
                 r"hello 1>>file.txt",
                 vec![
-                    Value("hello".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
                     Stdout(Append),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
             (
                 r"hello 2>>file.txt",
                 vec![
-                    Value("hello".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
                     Stderr(Append),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
             (
                 r"hello 2 >file.txt",
                 vec![
-                    Value("hello".to_string()),
-                    Value("2".to_string()),
+                    Word(vec![Literal("hello".to_string())]),
+                    Word(vec![Literal("2".to_string())]),
                     Stdout(Redirect),
-                    Value("file.txt".to_string()),
+                    Word(vec![Literal("file.txt".to_string())]),
                 ],
             ),
         ];
+        for (input, expected) in tests {
+            test_tokenized(input, &expected);
+        }
+    }
+
+    #[test]
+    fn tokenize_expansions() {
+        let tests = [(
+            "echo $GREETING hello$NAME ${EXCL}1${EXCL}$EXCL $EXCL$NAME",
+            vec![
+                Word(vec![Literal("echo".to_string())]),
+                Word(vec![Expansion("GREETING".to_string())]),
+                Word(vec![
+                    Literal("hello".to_string()),
+                    Expansion("NAME".to_string()),
+                ]),
+                Word(vec![
+                    Expansion("EXCL".to_string()),
+                    Literal("1".to_string()),
+                    Expansion("EXCL".to_string()),
+                    Expansion("EXCL".to_string()),
+                ]),
+                Word(vec![Expansion("EXCL$NAME".to_string())]),
+            ],
+        )];
         for (input, expected) in tests {
             test_tokenized(input, &expected);
         }

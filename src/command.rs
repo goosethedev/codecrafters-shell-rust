@@ -1,6 +1,7 @@
 use std::io::Write;
 
-use crate::lexer::{Lexer, Token, WriteMode};
+use crate::VarStore;
+use crate::lexer::{Lexer, Token, Value, WriteMode};
 
 // TODO: move execution as a method and not expose the struct fields
 // TODO: parse options in any position of the command
@@ -14,11 +15,12 @@ pub struct Command {
 
 impl Command {
     // TODO: proper error handling
-    pub fn parse(input: &str) -> Option<Self> {
+    pub fn parse(input: &str, kv: &VarStore) -> Option<Self> {
         let mut tokens = Lexer::new(input).tokenize().ok()?.into_iter();
-        let Token::Value(bin) = tokens.next()? else {
+        let Token::Word(values) = tokens.next()? else {
             return None;
         };
+        let bin = resolve_word(values, kv);
         let mut args = vec![];
         let mut stdout = None;
         let mut stderr = None;
@@ -26,11 +28,12 @@ impl Command {
 
         while let Some(t) = tokens.next() {
             match t {
-                Token::Value(s) => args.push(s),
+                Token::Word(values) => args.push(resolve_word(values, kv)),
                 Token::Stdout(mode) => {
-                    let Token::Value(file) = tokens.next()? else {
+                    let Token::Word(values) = tokens.next()? else {
                         return None;
                     };
+                    let file = resolve_word(values, kv);
                     let file = std::fs::OpenOptions::new()
                         .create(true)
                         .write(true)
@@ -41,9 +44,10 @@ impl Command {
                     stdout = Some(file);
                 }
                 Token::Stderr(mode) => {
-                    let Token::Value(file) = tokens.next()? else {
+                    let Token::Word(values) = tokens.next()? else {
                         return None;
                     };
+                    let file = resolve_word(values, kv);
                     let file = std::fs::OpenOptions::new()
                         .create(true)
                         .write(true)
@@ -97,4 +101,19 @@ impl Command {
             eprint!("{}", String::from_utf8_lossy(bytes));
         }
     }
+}
+
+fn resolve_word(values: Vec<Value>, kv: &VarStore) -> String {
+    let mut word = String::new();
+    for v in values {
+        match v {
+            Value::Literal(s) => word.push_str(&s),
+            Value::Expansion(k) => {
+                if let Some(v) = kv.get(&k) {
+                    word.push_str(v);
+                }
+            }
+        }
+    }
+    word
 }
