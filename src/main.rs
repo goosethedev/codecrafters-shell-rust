@@ -159,6 +159,9 @@ fn main() -> anyhow::Result<()> {
         0
     };
 
+    // Keep track of last appended history to any file
+    let mut last_append_at = 0;
+
     loop {
         match rl.readline("$ ") {
             Ok(line) => {
@@ -248,14 +251,15 @@ fn main() -> anyhow::Result<()> {
                                 let _ = rl.load_history(path);
                             }
                             Some("-w") => {
-                                use std::io::Write;
                                 // Write to file
                                 let path = args.next().unwrap();
-                                let file = std::fs::File::create(path).unwrap();
-                                let mut writer = std::io::BufWriter::new(file);
-                                for entry in rl.history() {
-                                    writeln!(writer, "{entry}").unwrap();
-                                }
+                                let _ = write_history(&mut rl, path, 0, false);
+                            }
+                            Some("-a") => {
+                                // Append to file
+                                let path = args.next().unwrap();
+                                let _ = write_history(&mut rl, path, last_append_at, true);
+                                last_append_at = rl.history().len();
                             }
                             Some(n) => {
                                 // List last n
@@ -279,16 +283,7 @@ fn main() -> anyhow::Result<()> {
                     "exit" => {
                         // Try to save history from HISTFILE
                         if let Some(hist_path) = std::env::var_os("HISTFILE") {
-                            use std::io::Write;
-                            let file = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(hist_path)
-                                .unwrap();
-                            let mut writer = std::io::BufWriter::new(file);
-                            for entry in rl.history().iter().skip(saved_count) {
-                                writeln!(writer, "{entry}").unwrap();
-                            }
+                            let _ = write_history(&mut rl, hist_path, saved_count, true);
                         }
 
                         break;
@@ -370,4 +365,25 @@ fn execute_command(
     args: Vec<impl AsRef<OsStr>>,
 ) -> std::io::Result<Output> {
     std::process::Command::new(bin).args(args).output()
+}
+
+fn write_history(
+    rl: &mut Editor<ShellHelper, FileHistory>,
+    path: impl AsRef<Path>,
+    skip: usize,
+    append: bool,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(!append)
+        .truncate(!append)
+        .append(append)
+        .open(path)
+        .unwrap();
+    let mut writer = std::io::BufWriter::new(file);
+    for entry in rl.history().iter().skip(skip) {
+        writeln!(writer, "{entry}").unwrap();
+    }
+    Ok(())
 }
