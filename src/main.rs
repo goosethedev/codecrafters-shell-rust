@@ -134,6 +134,7 @@ impl Completer for ShellHelper {
 // that makes CodeCrafters' tests fail.
 fn main() -> anyhow::Result<()> {
     let config = Config::builder()
+        .history_ignore_dups(false)?
         .history_ignore_space(true)
         .completion_type(CompletionType::List)
         .bell_style(rustyline::config::BellStyle::Audible)
