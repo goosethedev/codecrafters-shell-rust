@@ -10,7 +10,7 @@ use std::process::Output;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::history::{DefaultHistory, History};
+use rustyline::history::{FileHistory, History};
 use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
 use trie_rs::{Trie, TrieBuilder};
 
@@ -138,7 +138,7 @@ fn main() -> anyhow::Result<()> {
         .edit_mode(rustyline::EditMode::Emacs)
         .build();
 
-    let mut rl = Editor::<ShellHelper, DefaultHistory>::with_config(config)?;
+    let mut rl = Editor::<ShellHelper, FileHistory>::with_config(config)?;
 
     rl.set_helper(Some(ShellHelper {
         path_execs: scan_path_executables(),
@@ -147,6 +147,11 @@ fn main() -> anyhow::Result<()> {
     }));
 
     let mut jobs = JobTable::new();
+
+    // Try to load history from HISTFILE
+    if let Some(hist_path) = std::env::var_os("HISTFILE") {
+        let _ = rl.load_history(&hist_path);
+    }
 
     loop {
         match rl.readline("$ ") {
@@ -229,19 +234,45 @@ fn main() -> anyhow::Result<()> {
                         jobs.list_and_reap(false);
                     }
                     "history" => {
-                        let n = match cmd.args.iter().next().map(|n| n.parse::<usize>()) {
-                            Some(Ok(n)) => rl.history().len() - n,
-                            Some(Err(_)) => {
-                                eprintln!("history: numeric argument required");
-                                continue;
+                        let mut args = cmd.args.iter();
+                        match args.next().and_then(|v| Some(v.as_str())) {
+                            Some("-r") => {
+                                // Read from file
+                                let path = args.next().unwrap();
+                                let _ = rl.load_history(path);
                             }
-                            None => 0,
+                            Some("-w") => {
+                                // Write to file
+                                let path = args.next().unwrap();
+                                let _ = rl.save_history(path);
+                            }
+                            Some(n) => {
+                                // List last n
+                                let Ok(n) = n.parse::<usize>() else {
+                                    eprintln!("history: numeric argument required");
+                                    continue;
+                                };
+                                let n_skip = rl.history().len() - n;
+                                for (i, entry) in rl.history().iter().skip(n_skip).enumerate() {
+                                    println!("{:>5}  {entry}", n_skip + i + 1);
+                                }
+                            }
+                            None => {
+                                // List all
+                                for (i, entry) in rl.history().iter().enumerate() {
+                                    println!("{:>5}  {entry}", i + 1);
+                                }
+                            }
                         };
-                        for (i, entry) in rl.history().iter().skip(n).enumerate() {
-                            println!("{:>5}  {entry}", n + i + 1);
-                        }
                     }
-                    "exit" => break,
+                    "exit" => {
+                        // Try to save history from HISTFILE
+                        if let Some(hist_path) = std::env::var_os("HISTFILE") {
+                            rl.append_history(&hist_path).unwrap();
+                        }
+
+                        break;
+                    }
                     bin => match search_bin_in_path(bin) {
                         Some(bin) => {
                             if cmd.bg {
