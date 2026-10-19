@@ -1,334 +1,95 @@
-mod command;
 mod jobs;
 mod lexer;
+mod parser;
+mod readline;
+mod utils;
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Stdio};
 
-use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::history::{FileHistory, History};
-use rustyline::{CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator};
-use trie_rs::{Trie, TrieBuilder};
+use rustyline::history::History;
 
 use crate::jobs::JobTable;
+use crate::lexer::Lexer;
+use crate::parser::{Instruction, Parser, ParserOutput};
+use crate::readline::{LineEditor, get_line_editor};
+use crate::utils::is_executable;
 
-const BUILTINS: &[&str] = &[
+pub(crate) const BUILTINS: &[&str] = &[
     "echo", "type", "exit", "pwd", "cd", "complete", "jobs", "history", "declare",
 ];
 
-#[derive(Helper, Validator, Hinter, Highlighter)]
-struct ShellHelper {
-    path_execs: Trie<u8>,
-    filename_completer: FilenameCompleter,
-    completion_scripts: HashMap<String, PathBuf>,
-}
-
-impl ShellHelper {
-    fn get_completion_script(&self, command: &str) -> Option<&PathBuf> {
-        self.completion_scripts.get(command)
-    }
-
-    fn register_custom_completion(&mut self, command: &str, script_path: &str) {
-        let script = PathBuf::from(script_path);
-        self.completion_scripts.insert(command.to_string(), script);
-    }
-
-    fn unregister_custom_completion(&mut self, command: &str) {
-        let _ = self.completion_scripts.remove(command);
-    }
-
-    fn get_custom_completions(
-        &self,
-        command: &str,
-        partial: &str,
-        previous: &str,
-        full_line: &str,
-        pos: usize,
-    ) -> Option<Vec<String>> {
-        let script = self.get_completion_script(command)?;
-        let output = std::process::Command::new(script)
-            .args([command, partial, previous])
-            .env("COMP_LINE", full_line)
-            .env("COMP_POINT", pos.to_string())
-            .output()
-            .unwrap();
-        Some(
-            String::from_utf8(output.stdout)
-                .unwrap()
-                .lines()
-                .map(ToString::to_string)
-                .collect(),
-        )
-    }
-}
-
-impl Completer for ShellHelper {
-    type Candidate = Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        ctx: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
-        let start = line[..pos]
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let word = &line[start..pos];
-
-        // If completing the first word, search for binaries
-        if start == 0 {
-            let matches = self
-                .path_execs
-                .predictive_search(word)
-                .map(|res: String| Pair {
-                    display: res.clone(),
-                    replacement: format!("{res} "),
-                })
-                .collect();
-            return Ok((start, matches));
-        };
-
-        // Else, try getting custom completions for the binary
-        let (bin, _) = line.split_once(" ").unwrap();
-        let prev = line[..start]
-            .trim_end()
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let prev = &line[prev..start].trim_end();
-        if let Some(completions) = self.get_custom_completions(bin, word, prev, line, pos) {
-            let matches = completions
-                .iter()
-                .filter(|c| c.starts_with(word))
-                .map(|c| Pair {
-                    display: c.clone(),
-                    replacement: format!("{c} "),
-                })
-                .collect();
-            return Ok((start, matches));
-        }
-
-        // Else, search for filenames
-        let mut res = self.filename_completer.complete(line, pos, ctx)?;
-
-        // Append a space to not-dir completions and a "/" to dir list alternatives
-        for pair in res.1.iter_mut() {
-            let filepath = std::env::current_dir().unwrap().join(&pair.replacement);
-            if filepath.is_file() {
-                pair.replacement.push(' ');
-            } else {
-                pair.display.push('/');
-            }
-        }
-        Ok(res)
-    }
-}
-
 pub type VarStore = HashMap<String, String>;
 
-// NOTE: Saving history to file uses a custom iterator to avoid setting the #V2 header
-// that makes CodeCrafters' tests fail.
+#[derive(Default)]
+struct ShellState {
+    jobs: JobTable,
+    var_store: VarStore,
+}
+
 fn main() -> anyhow::Result<()> {
-    let config = Config::builder()
-        .history_ignore_dups(false)?
-        .history_ignore_space(true)
-        .completion_type(CompletionType::List)
-        .bell_style(rustyline::config::BellStyle::Audible)
-        .edit_mode(rustyline::EditMode::Emacs)
-        .build();
+    // If args are "-c command", execute it immediately and exit
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1) == Some(&"-c".to_string())
+        && let Some(line) = args.get(2)
+        && !line.is_empty()
+    {
+        let mut state = ShellState::default();
+        let tokens = Lexer::new(line).tokenize()?;
 
-    let mut rl = Editor::<ShellHelper, FileHistory>::with_config(config)?;
+        let out = Parser::new(tokens, &state.var_store).parse()?;
+        match out {
+            ParserOutput::Instruction(i, _) if i.cmd == "exit" => return Ok(()),
+            ParserOutput::Instruction(i, bg) => exec_instruction(i, bg, &mut state, None)?,
+            ParserOutput::Pipeline(p, bg) => exec_pipeline(p, bg, None)?,
+        }
+        return Ok(());
+    }
 
-    rl.set_helper(Some(ShellHelper {
-        path_execs: scan_path_executables(),
-        filename_completer: FilenameCompleter::new(),
-        completion_scripts: HashMap::new(),
-    }));
+    // Configured Rustyline line editor
+    let mut rl = get_line_editor()?;
 
-    let mut jobs = JobTable::new();
+    // Shell state
+    let mut state = ShellState::default();
 
-    // Try to load history from HISTFILE
-    let saved_count = if let Some(hist_path) = std::env::var_os("HISTFILE") {
-        let _ = rl.load_history(&hist_path);
-        rl.history().len()
-    } else {
-        0
-    };
-
-    // Keep track of last appended history to any file
-    let mut last_append_at = 0;
-
-    // Keep track of declared variables
-    let mut var_store = VarStore::new();
-
+    // Main exec loop
     loop {
         match rl.readline("$ ") {
             Ok(line) => {
-                rl.add_history_entry(&line).unwrap();
-                let Some(cmd) = crate::command::Command::parse(&line, &var_store) else {
+                if line.is_empty() {
                     continue;
+                }
+
+                // Add command to history
+                rl.add_history_entry(&line).unwrap();
+
+                // Parse and execute instruction/pipeline
+                let tokens = match Lexer::new(&line).tokenize() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        continue;
+                    }
                 };
-
-                match cmd.bin.as_str() {
-                    "type" => {
-                        let param = cmd.args.first().unwrap();
-                        let out = if BUILTINS.contains(&param.as_str()) {
-                            format!("{param} is a shell builtin")
-                        } else if let Some(bin_path) = search_bin_in_path(param) {
-                            format!("{param} is {}", bin_path.to_str().unwrap())
-                        } else {
-                            format!("{param}: not found")
-                        };
-                        cmd.writeln_stdout(out.as_bytes());
-                    }
-                    "echo" => cmd.writeln_stdout(cmd.args.join(" ").as_bytes()),
-                    "pwd" => cmd.writeln_stdout(
-                        std::env::current_dir()
-                            .unwrap()
-                            .to_str()
-                            .unwrap()
-                            .as_bytes(),
-                    ),
-                    "cd" => match cmd.args.first().map(PathBuf::from) {
-                        Some(path) if path.is_dir() => {
-                            std::env::set_current_dir(path).expect("Error changing working dir");
-                        }
-                        Some(path) if path.starts_with("~") => {
-                            let home = std::env::var("HOME").expect("HOME var not found");
-                            let path = path.to_string_lossy().replace("~", &home);
-                            std::env::set_current_dir(path).expect("Error changing working dir");
-                        }
-                        Some(path) => cmd.writeln_stderr(
-                            format!("cd: {}: No such file or directory", path.to_str().unwrap())
-                                .as_bytes(),
-                        ),
-                        None => cmd.writeln_stderr("Error: argument required".as_bytes()),
-                    },
-                    "complete" => {
-                        let mut args = cmd.args.iter();
-                        if let Some(opt) = args.next() {
-                            match opt.as_str() {
-                                "-p" => {
-                                    let bin = args.next().unwrap();
-                                    if let Some(script) =
-                                        rl.helper().unwrap().get_completion_script(bin)
-                                    {
-                                        let script = script.to_str().unwrap();
-                                        let msg = format!("complete -C '{script}' {bin}");
-                                        cmd.writeln_stdout(&msg);
-                                    } else {
-                                        cmd.writeln_stderr(format!(
-                                            "complete: {bin}: no completion specification"
-                                        ));
-                                    };
-                                }
-                                "-C" => {
-                                    let script_path = args.next().unwrap();
-                                    let bin = args.next().unwrap();
-                                    rl.helper_mut()
-                                        .unwrap()
-                                        .register_custom_completion(bin, script_path);
-                                }
-                                "-r" => {
-                                    let bin = args.next().unwrap();
-                                    rl.helper_mut().unwrap().unregister_custom_completion(bin);
-                                }
-                                _ => {}
-                            }
+                match Parser::new(tokens, &state.var_store).parse() {
+                    Ok(ParserOutput::Instruction(i, _)) if i.cmd == "exit" => break,
+                    Ok(ParserOutput::Instruction(i, bg)) => {
+                        if let Err(e) = exec_instruction(i, bg, &mut state, Some(&mut rl)) {
+                            eprintln!("{e}")
                         }
                     }
-                    "jobs" => {
-                        jobs.poll();
-                        jobs.list_and_reap(false);
-                    }
-                    "history" => {
-                        let mut args = cmd.args.iter();
-                        match args.next().map(|v| v.as_str()) {
-                            Some("-r") => {
-                                // Read from file
-                                let path = args.next().unwrap();
-                                let _ = rl.load_history(path);
-                            }
-                            Some("-w") => {
-                                // Write to file
-                                let path = args.next().unwrap();
-                                let _ = write_history(&mut rl, path, 0, false);
-                            }
-                            Some("-a") => {
-                                // Append to file
-                                let path = args.next().unwrap();
-                                let _ = write_history(&mut rl, path, last_append_at, true);
-                                last_append_at = rl.history().len();
-                            }
-                            Some(n) => {
-                                // List last n
-                                let Ok(n) = n.parse::<usize>() else {
-                                    eprintln!("history: numeric argument required");
-                                    continue;
-                                };
-                                let n_skip = rl.history().len() - n;
-                                for (i, entry) in rl.history().iter().skip(n_skip).enumerate() {
-                                    println!("{:>5}  {entry}", n_skip + i + 1);
-                                }
-                            }
-                            None => {
-                                // List all
-                                for (i, entry) in rl.history().iter().enumerate() {
-                                    println!("{:>5}  {entry}", i + 1);
-                                }
-                            }
-                        };
-                    }
-                    "declare" => {
-                        let mut args = cmd.args.iter();
-                        match args.next().unwrap().as_str() {
-                            "-p" => {
-                                let var_name = args.next().unwrap();
-                                match var_store.get(var_name) {
-                                    Some(v) => println!(r#"declare -- {var_name}="{v}""#),
-                                    None => eprintln!("declare: {var_name}: not found"),
-                                };
-                            }
-                            v => {
-                                let (var_name, value) = v.split_once("=").unwrap();
-                                if !is_valid_identifier(var_name) {
-                                    eprintln!(r"declare: `{v}': not a valid identifier");
-                                    continue;
-                                }
-                                var_store.insert(var_name.to_string(), value.to_string());
-                            }
+                    Ok(ParserOutput::Pipeline(p, bg)) => {
+                        if let Err(e) = exec_pipeline(p, bg, None) {
+                            eprintln!("{e}")
                         }
                     }
-                    "exit" => {
-                        // Try to save history from HISTFILE
-                        if let Some(hist_path) = std::env::var_os("HISTFILE") {
-                            let _ = write_history(&mut rl, hist_path, saved_count, true);
-                        }
-
-                        break;
+                    Err(e) => {
+                        eprintln!("{e}");
+                        continue;
                     }
-                    bin => match search_bin_in_path(bin) {
-                        Some(bin) => {
-                            if cmd.bg {
-                                jobs.spawn_background(cmd).unwrap();
-                                continue;
-                            }
-                            match execute_command(bin.file_name().unwrap(), cmd.args.clone()) {
-                                Ok(Output { stdout, stderr, .. }) => {
-                                    cmd.write_stdout(&stdout);
-                                    cmd.write_stderr(&stderr);
-                                }
-                                Err(e) => cmd.writeln_stderr(e.to_string().as_bytes()),
-                            }
-                        }
-                        None => cmd.writeln_stderr(format!("{bin}: command not found").as_bytes()),
-                    },
                 }
             }
             Err(ReadlineError::Interrupted) => continue,
@@ -338,30 +99,270 @@ fn main() -> anyhow::Result<()> {
             }
         };
 
-        jobs.poll();
-        jobs.list_and_reap(true);
+        // Poll and reap finished bg jobs
+        state.jobs.poll();
+        state.jobs.list_and_reap(true);
     }
+
+    // Try to save history from HISTFILE
+    if let Some(hist_path) = std::env::var_os("HISTFILE") {
+        let saved_count = rl.helper().unwrap().hist_saved_in_file;
+        let _ = write_history(&mut rl, hist_path, saved_count, true);
+    }
+
     Ok(())
 }
 
-fn scan_path_executables() -> Trie<u8> {
-    let mut builder = TrieBuilder::new();
-    // First, include all built-ins
-    BUILTINS.iter().for_each(|b| builder.push(b));
+fn exec_instruction(
+    instruction: Instruction,
+    bg: bool,
+    state: &mut ShellState,
+    rl: Option<&mut LineEditor>,
+) -> anyhow::Result<()> {
+    // Setup redirections for std streams
+    let mut stdout: Box<dyn Write> = match instruction.stdout {
+        Some(ref out) => Box::new(out),
+        None => Box::new(io::stdout()),
+    };
+    let mut stderr: Box<dyn Write> = match instruction.stderr {
+        Some(ref err) => Box::new(err),
+        None => Box::new(io::stderr()),
+    };
 
-    let path_var = std::env::var_os("PATH").expect("Unable to find PATH variable");
-    for dir in std::env::split_paths(&path_var) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let bin = entry.path();
-            if is_executable(&bin) {
-                builder.push(bin.file_name().unwrap().as_bytes());
+    match instruction.cmd.as_str() {
+        "type" => {
+            for arg in instruction.args {
+                if BUILTINS.contains(&arg.as_str()) {
+                    writeln!(stdout, "{arg} is a shell builtin")?
+                } else if let Some(bin_path) = search_bin_in_path(&arg) {
+                    writeln!(stdout, "{arg} is {}", bin_path.to_str().unwrap())?
+                } else {
+                    writeln!(stderr, "{arg}: not found")?
+                };
             }
         }
+        "echo" => writeln!(stdout, "{}", instruction.args.join(" "))?,
+        "pwd" => {
+            let curr_dir = std::env::current_dir().unwrap();
+            writeln!(stdout, "{}", curr_dir.to_str().unwrap())?;
+        }
+        "cd" => match instruction.args.first().map(PathBuf::from) {
+            Some(path) if path.is_dir() => {
+                std::env::set_current_dir(path).expect("Error changing working dir");
+            }
+            Some(path) if path.starts_with("~") => {
+                let home = std::env::var("HOME").expect("HOME var not found");
+                let path = path.to_string_lossy().replace("~", &home);
+                std::env::set_current_dir(path).expect("Error changing working dir");
+            }
+            Some(path) => {
+                let path = path.to_str().unwrap();
+                writeln!(stderr, "cd: {path}: No such file or directory",)?;
+            }
+            None => writeln!(stderr, "Error: argument required")?,
+        },
+        "complete" => {
+            if let Some(rl) = rl {
+                let shell = rl.helper_mut().unwrap();
+                let mut args = instruction.args.iter();
+                if let Some(opt) = args.next() {
+                    match opt.as_str() {
+                        "-p" => {
+                            let bin = args.next().unwrap();
+                            if let Some(script) = shell.get_completion_script(bin) {
+                                let script = script.to_str().unwrap();
+                                writeln!(stdout, "complete -C '{script}' {bin}")?;
+                            } else {
+                                writeln!(stderr, "complete: {bin}: no completion specification")?;
+                            };
+                        }
+                        "-C" => {
+                            let script_path = args.next().unwrap();
+                            let bin = args.next().unwrap();
+                            shell.register_custom_completion(bin, script_path);
+                        }
+                        "-r" => {
+                            let bin = args.next().unwrap();
+                            shell.unregister_custom_completion(bin);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        "jobs" => {
+            state.jobs.poll();
+            state.jobs.list_and_reap(false);
+        }
+        "history" => {
+            if let Some(rl) = rl {
+                let mut args = instruction.args.iter();
+                match args.next().map(|v| v.as_str()) {
+                    Some("-r") => {
+                        // Read from file
+                        let path = args.next().unwrap();
+                        let _ = rl.load_history(path);
+                    }
+                    Some("-w") => {
+                        // Write to file
+                        let path = args.next().unwrap();
+                        let _ = write_history(rl, path, 0, false);
+                    }
+                    Some("-a") => {
+                        // Append to file
+                        let path = args.next().unwrap();
+                        let last_append_at = rl.helper_mut().unwrap().hist_last_appended_at;
+                        let _ = write_history(rl, path, last_append_at, true);
+                        rl.helper_mut().unwrap().hist_last_appended_at = rl.history().len();
+                    }
+                    Some(n) => {
+                        // List last n
+                        let Ok(n) = n.parse::<usize>() else {
+                            writeln!(stderr, "history: numeric argument required")?;
+                            return Ok(());
+                        };
+                        let n_skip = rl.history().len() - n;
+                        for (i, entry) in rl.history().iter().skip(n_skip).enumerate() {
+                            writeln!(stdout, "{:>5}  {entry}", n_skip + i + 1)?;
+                        }
+                    }
+                    None => {
+                        // List all
+                        for (i, entry) in rl.history().iter().enumerate() {
+                            writeln!(stdout, "{:>5}  {entry}", i + 1)?;
+                        }
+                    }
+                };
+            }
+        }
+        "declare" => {
+            let mut args = instruction.args.iter();
+            match args.next().unwrap().as_str() {
+                "-p" => {
+                    let var_name = args.next().unwrap();
+                    match state.var_store.get(var_name) {
+                        Some(v) => writeln!(stdout, r#"declare -- {var_name}="{v}""#)?,
+                        None => writeln!(stderr, "declare: {var_name}: not found")?,
+                    };
+                }
+                v => {
+                    let (var_name, value) = v.split_once("=").unwrap();
+                    if !is_valid_identifier(var_name) {
+                        writeln!(stderr, r"declare: `{v}': not a valid identifier")?;
+                        return Ok(());
+                    }
+                    state
+                        .var_store
+                        .insert(var_name.to_string(), value.to_string());
+                }
+            }
+        }
+        "exit" => {}
+        bin => match search_bin_in_path(bin) {
+            Some(_) => {
+                drop(stdout);
+                drop(stderr);
+                // Execute external binary in child process
+                // TODO: There has to be a better way to do this...
+                if bg {
+                    state.jobs.spawn_background(instruction)?;
+                } else {
+                    Command::new(bin)
+                        .args(instruction.args)
+                        .stdout(match instruction.stdout {
+                            Some(f) => Stdio::from(f),
+                            None => Stdio::inherit(),
+                        })
+                        .stderr(match instruction.stderr {
+                            Some(f) => Stdio::from(f),
+                            None => Stdio::inherit(),
+                        })
+                        .spawn()?
+                        .wait()?;
+                }
+            }
+            None => writeln!(stderr, "{bin}: command not found")?,
+        },
     }
-    builder.build()
+
+    Ok(())
+}
+
+fn exec_pipeline(
+    pipeline: Vec<Instruction>,
+    _bg: bool,
+    _rl: Option<&mut LineEditor>,
+) -> anyhow::Result<()> {
+    let len = pipeline.len();
+    let mut children = Vec::with_capacity(len);
+    let mut prev_stdout: Option<std::process::ChildStdout> = None;
+
+    for (i, stage) in pipeline.into_iter().enumerate() {
+        let is_first = i == 0;
+        let is_last = i == len - 1;
+        let is_builtin = BUILTINS.contains(&stage.cmd.as_str());
+
+        let mut cmd = if is_builtin {
+            let command = format!("{} {}", stage.cmd, stage.args.join(" "));
+
+            let mut cmd = Command::new(std::env::current_exe()?);
+            cmd.args(["-c", &command]);
+            cmd
+        } else {
+            let mut cmd = Command::new(&stage.cmd);
+            cmd.args(&stage.args);
+            cmd
+        };
+
+        // Connect stdin to the preceding stage.
+        let stdin = match prev_stdout.take() {
+            Some(stdout) => Stdio::from(stdout),
+            None if is_first => Stdio::inherit(),
+            None => Stdio::null(),
+        };
+
+        // Redirect stdout, or pipe it to the next stage.
+        let stdout = match stage.stdout {
+            Some(out) => Stdio::from(out),
+            None if !is_last => Stdio::piped(),
+            None => Stdio::inherit(),
+        };
+
+        let stderr = match stage.stderr {
+            Some(err) => Stdio::from(err),
+            None => Stdio::inherit(),
+        };
+
+        cmd.stdin(stdin).stdout(stdout).stderr(stderr);
+
+        let mut child = cmd.spawn()?;
+        prev_stdout = child.stdout.take();
+        children.push(child);
+    }
+
+    for mut child in children {
+        let status = child.wait()?;
+        if !status.success() {
+            // Optional: propagate or record the failure.
+        }
+    }
+
+    Ok(())
+}
+pub struct ExternalIo {
+    pub stdin: Stdio,
+    pub stdout: Stdio,
+    pub stderr: Stdio,
+}
+
+impl Default for ExternalIo {
+    fn default() -> Self {
+        Self {
+            stdin: Stdio::inherit(),
+            stdout: Stdio::inherit(),
+            stderr: Stdio::inherit(),
+        }
+    }
 }
 
 fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
@@ -376,24 +377,8 @@ fn search_bin_in_path(bin: &str) -> Option<PathBuf> {
     None
 }
 
-fn is_executable(path: impl AsRef<Path>) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    match path.as_ref().metadata() {
-        Ok(meta) if meta.is_file() => meta.permissions().mode() & 0o111 != 0,
-        _ => false,
-    }
-}
-
-fn execute_command(
-    bin: impl AsRef<OsStr>,
-    args: Vec<impl AsRef<OsStr>>,
-) -> std::io::Result<Output> {
-    std::process::Command::new(bin).args(args).output()
-}
-
 fn write_history(
-    rl: &mut Editor<ShellHelper, FileHistory>,
+    rl: &mut LineEditor,
     path: impl AsRef<Path>,
     skip: usize,
     append: bool,
@@ -414,7 +399,7 @@ fn write_history(
 }
 
 fn is_valid_identifier(value: &str) -> bool {
-    let first = value.as_bytes().get(0).unwrap();
+    let first = value.as_bytes().first().unwrap();
     (first.is_ascii_alphabetic() || *first == b'_')
         && value
             .chars()

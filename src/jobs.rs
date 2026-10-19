@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::process::{Child, Command, Stdio};
 
 use indexmap::IndexMap;
@@ -17,24 +15,27 @@ pub struct Job {
     status: JobStatus,
 }
 
+#[derive(Default)]
 pub struct JobTable {
     jobs: IndexMap<u32, Job>,
 }
 
 impl JobTable {
-    pub fn new() -> Self {
-        JobTable {
-            jobs: IndexMap::new(),
-        }
-    }
-
-    pub fn spawn_background(&mut self, command: crate::command::Command) -> std::io::Result<u32> {
+    pub fn spawn_background(
+        &mut self,
+        command: crate::parser::Instruction,
+    ) -> std::io::Result<u32> {
         let cmd_raw = command.prettify();
-        let child = Command::new(command.bin)
+        let child = Command::new(command.cmd)
             .args(command.args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(match command.stdout {
+                Some(f) => Stdio::from(f),
+                None => Stdio::inherit(),
+            })
+            .stderr(match command.stderr {
+                Some(f) => Stdio::from(f),
+                None => Stdio::inherit(),
+            })
             .spawn()?;
 
         let id = self.next_id();

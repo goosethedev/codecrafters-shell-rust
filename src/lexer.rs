@@ -6,6 +6,7 @@ pub enum Token {
     Stdout(WriteMode),
     Stderr(WriteMode),
     Ampersand,
+    Pipe,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,9 +21,11 @@ pub enum WriteMode {
     Redirect,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum LexError {
+    #[error("quoted string was not closed")]
     UnterminatedString,
+    #[error("invalid escaped character")]
     InvalidEscape,
 }
 
@@ -135,6 +138,7 @@ impl<'a> Lexer<'a> {
     fn tokenize_single_char(&mut self) -> Option<Token> {
         let token = match self.peek()? {
             '&' => Token::Ampersand,
+            '|' => Token::Pipe,
             _ => return None,
         };
         self.next().unwrap();
@@ -152,7 +156,7 @@ impl<'a> Lexer<'a> {
 
     fn take_while(&mut self, f: impl Fn(char) -> bool) -> String {
         let mut buf = String::new();
-        while let Some(ch) = self.next_if(|ch| f(ch)) {
+        while let Some(ch) = self.next_if(&f) {
             buf.push(ch);
         }
         buf
