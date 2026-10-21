@@ -40,8 +40,7 @@ fn main() -> anyhow::Result<()> {
         let mut state = ShellState::default();
         let tokens = Lexer::new(line).tokenize()?;
 
-        let out = Parser::new(tokens, &state.var_store).parse()?;
-        match out {
+        match Parser::new(tokens, &state.var_store).parse()? {
             ParserOutput::Instruction(i, _) if i.cmd == "exit" => return Ok(()),
             ParserOutput::Instruction(i, bg) => exec_instruction(i, bg, &mut state, None)?,
             ParserOutput::Pipeline(p, bg) => exec_pipeline(p, bg, None)?,
@@ -303,10 +302,9 @@ fn exec_pipeline(
         let is_builtin = BUILTINS.contains(&stage.cmd.as_str());
 
         let mut cmd = if is_builtin {
-            let command = format!("{} {}", stage.cmd, stage.args.join(" "));
-
+            let subcommand = format!("{} {}", stage.cmd, stage.args.join(" "));
             let mut cmd = Command::new(std::env::current_exe()?);
-            cmd.args(["-c", &command]);
+            cmd.args(["-c", &subcommand]);
             cmd
         } else {
             let mut cmd = Command::new(&stage.cmd);
@@ -341,28 +339,10 @@ fn exec_pipeline(
     }
 
     for mut child in children {
-        let status = child.wait()?;
-        if !status.success() {
-            // Optional: propagate or record the failure.
-        }
+        child.wait()?;
     }
 
     Ok(())
-}
-pub struct ExternalIo {
-    pub stdin: Stdio,
-    pub stdout: Stdio,
-    pub stderr: Stdio,
-}
-
-impl Default for ExternalIo {
-    fn default() -> Self {
-        Self {
-            stdin: Stdio::inherit(),
-            stdout: Stdio::inherit(),
-            stderr: Stdio::inherit(),
-        }
-    }
 }
 
 fn search_bin_in_path(bin: &str) -> Option<PathBuf> {

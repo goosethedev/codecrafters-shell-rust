@@ -23,16 +23,16 @@ pub struct JobTable {
 impl JobTable {
     pub fn spawn_background(
         &mut self,
-        command: crate::parser::Instruction,
+        instruction: crate::parser::Instruction,
     ) -> std::io::Result<u32> {
-        let cmd_raw = command.prettify();
-        let child = Command::new(command.cmd)
-            .args(command.args)
-            .stdout(match command.stdout {
+        let command = instruction.prettify();
+        let child = Command::new(instruction.cmd)
+            .args(instruction.args)
+            .stdout(match instruction.stdout {
                 Some(f) => Stdio::from(f),
                 None => Stdio::inherit(),
             })
-            .stderr(match command.stderr {
+            .stderr(match instruction.stderr {
                 Some(f) => Stdio::from(f),
                 None => Stdio::inherit(),
             })
@@ -44,7 +44,7 @@ impl JobTable {
             id,
             Job {
                 id,
-                command: cmd_raw,
+                command,
                 child,
                 status: JobStatus::Running,
             },
